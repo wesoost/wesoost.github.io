@@ -146,6 +146,9 @@ input, textarea { font-size: 16px; /* prevents iOS zoom */ }
 .bd-close:active { background: #d6d3d1; }
 .bd-list { overflow: auto; -webkit-overflow-scrolling: touch; padding: 6px 22px 0; }
 .bd-client { display: flex; align-items: center; gap: 10px; padding: 13px 0; border-bottom: 1px solid #f0efed; }
+.bd-client[data-cid] { cursor: pointer; }
+.bd-client[data-cid]:active { background: #f5f5f4; }
+.bd-client .bd-go { flex-shrink: 0; color: #c4bfba; font-size: 22px; line-height: 1; margin-left: 2px; }
 .bd-client .bd-name { flex: 1; min-width: 0; font-size: 17px; font-weight: 600; }
 .bd-client .bd-sub { font-size: 13px; color: #a8a29e; margin-top: 2px; }
 .bd-amt { text-align: right; flex-shrink: 0; }
@@ -369,7 +372,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-03 · summary-title-2';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-03 · breakdown-to-profile';   // bump on each change; shown in Settings to confirm the loaded version
 
 const DEFAULT_DATA = {
   clinicRates: {
@@ -2926,7 +2929,7 @@ function openProductBreakdown(product, startISO, endISO) {
     const c = getClient(id);
     const name = c ? (`${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Unnamed client') : 'Unknown client';
     const { profit } = lineCostProfit(product, d.units, d.revenue);
-    return { name, profit, ...d };
+    return { clientId: c ? c.id : null, name, profit, ...d };
   }).sort((a, b) => b.revenue - a.revenue || b.units - a.units);
 
   const totUnits = rows.reduce((s, r) => s + r.units, 0);
@@ -2953,7 +2956,7 @@ function openProductBreakdown(product, startISO, endISO) {
       </div>
       <div class="bd-list">
         ${rows.length ? rows.map(r => `
-          <div class="bd-client">
+          <div class="bd-client"${r.clientId ? ` data-cid="${escapeHtml(r.clientId)}"` : ''}>
             <div style="flex:1;min-width:0;">
               <div class="bd-name">${escapeHtml(r.name)}</div>
               <div class="bd-sub">${unitStr(r.units)}${r.count} visit${r.count === 1 ? '' : 's'}</div>
@@ -2962,6 +2965,7 @@ function openProductBreakdown(product, startISO, endISO) {
               <div class="bd-charge">$${r.revenue.toFixed(0)}</div>
               <div class="bd-profit" style="color:${profitColor(r.profit)};">${profitText(r.profit)}</div>
             </div>
+            ${r.clientId ? '<div class="bd-go" aria-hidden="true">›</div>' : ''}
           </div>
         `).join('') : '<div style="padding:34px 0;text-align:center;color:#a8a29e;">No treatments in this period.</div>'}
       </div>
@@ -2977,8 +2981,14 @@ function openProductBreakdown(product, startISO, endISO) {
   document.body.appendChild(overlay);
   const close = () => overlay.remove();
   overlay.querySelector('#bd-close').addEventListener('click', close);
-  // Tap the dark scrim (outside the sheet) to dismiss.
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  overlay.addEventListener('click', (e) => {
+    // Tap the dark scrim (outside the sheet) to dismiss.
+    if (e.target === overlay) { close(); return; }
+    // Tap a client row → close this sheet and open that client's profile
+    // (their treatment history). Rows for unknown clients have no data-cid.
+    const row = e.target.closest('.bd-client[data-cid]');
+    if (row) { close(); setView('profile', { clientId: row.dataset.cid }); }
+  });
 }
 
 // ---------- Clients List Handlers ----------
