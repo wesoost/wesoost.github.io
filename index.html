@@ -372,7 +372,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-03 · breakdown-to-profile';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-03 · breakdown-tap-fix';   // bump on each change; shown in Settings to confirm the loaded version
 
 const DEFAULT_DATA = {
   clinicRates: {
@@ -2981,13 +2981,18 @@ function openProductBreakdown(product, startISO, endISO) {
   document.body.appendChild(overlay);
   const close = () => overlay.remove();
   overlay.querySelector('#bd-close').addEventListener('click', close);
-  overlay.addEventListener('click', (e) => {
-    // Tap the dark scrim (outside the sheet) to dismiss.
-    if (e.target === overlay) { close(); return; }
-    // Tap a client row → close this sheet and open that client's profile
-    // (their treatment history). Rows for unknown clients have no data-cid.
-    const row = e.target.closest('.bd-client[data-cid]');
-    if (row) { close(); setView('profile', { clientId: row.dataset.cid }); }
+  // Tap the dark scrim (outside the sheet) to dismiss.
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  // Tap a client row → open that client's profile (their treatment history).
+  // DIRECT per-row listeners, not delegation: iOS Safari only reliably fires a
+  // click on a non-<button> element when the handler is bound to it directly
+  // (delegated bubbling from a tapped <div> is unreliable). Rows for unknown/
+  // unlinked clients have no data-cid, so they stay inert.
+  overlay.querySelectorAll('.bd-client[data-cid]').forEach(row => {
+    row.addEventListener('click', () => {
+      close();
+      setView('profile', { clientId: row.dataset.cid });
+    });
   });
 }
 
