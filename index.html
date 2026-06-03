@@ -369,7 +369,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-02 · storage-readout';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-03 · records-backup';   // bump on each change; shown in Settings to confirm the loaded version
 
 const DEFAULT_DATA = {
   clinicRates: {
@@ -2560,9 +2560,10 @@ function viewSettings() {
               <strong style="color:#1c1917;" id="photo-count-display">…</strong> photos stored
             </div>
             <div class="mt-3" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-              <button class="btn" id="export-data" style="background:#f5f5f4;color:#1c1917;font-weight:500;">Export backup</button>
+              <button class="btn" id="export-data" style="background:#f5f5f4;color:#1c1917;font-weight:500;">Export full backup</button>
               <button class="btn" id="import-data" style="background:#f5f5f4;color:#1c1917;font-weight:500;">Import backup</button>
             </div>
+            <button class="btn" id="export-records" style="width:100%;margin-top:8px;background:#fef3c7;color:#78350f;font-weight:600;">Backup records only (small, emailable)</button>
             <div id="backup-status" style="display:none;font-size:12px;margin-top:10px;font-weight:500;"></div>
             <div id="import-confirm" style="display:none;margin-top:10px;padding:14px;border:1px solid #fcd34d;background:#fffbeb;border-radius:12px;">
               <div id="import-confirm-msg" style="font-size:14px;color:#78350f;font-weight:600;line-height:1.5;margin-bottom:12px;"></div>
@@ -2577,7 +2578,7 @@ function viewSettings() {
               const label = days === null ? 'No backup made yet on this device.' : `Last backup ${backupAgePhrase(days)}.`;
               return `<div style="font-size:14px;margin-top:10px;font-weight:600;color:${stale ? '#b45309' : '#047857'};">${label}</div>`;
             })()}
-            <div style="font-size:13px;color:#78716c;margin-top:10px;font-family:'Cormorant Garamond',serif;font-style:italic;">Note: backups now include all photos, so the file can be large. After tapping Export backup, choose <strong>Mail</strong> in the share sheet to email it to yourself, or save it to Files.</div>
+            <div style="font-size:13px;color:#78716c;margin-top:10px;font-family:'Cormorant Garamond',serif;font-style:italic;"><strong>Export full backup</strong> includes every photo, so the file is large (hundreds of MB) — too big to email. Save it to <strong>Dropbox</strong> or Files in the share sheet. <strong>Backup records only</strong> is a small file (clients, treatments &amp; rates — no photos) you can email to yourself. Do the records backup often; the full one occasionally.</div>
             <div style="margin-top:14px;border-top:1px solid #e7e5e4;padding-top:14px;">
               <div id="storage-readout" style="font-size:14px;color:#78716c;">Checking device storage…</div>
             </div>
@@ -4137,6 +4138,32 @@ function setupSettings() {
       _backupFile = file;  // keep it; the next tap shares with a fresh gesture
       show('Backup ready — tap “Export backup” again to save it.');
     }
+  });
+
+  // Records-only backup: clients/treatments/rates/appointments WITHOUT photos.
+  // state.data holds only small photo-id strings (the image bytes live in
+  // IndexedDB), so the file is a few MB and emailable. No getAllPhotos() read
+  // before share(), so user-activation is preserved and the _backupFile retry
+  // dance isn't needed. Imports via the normal path (photos absent → existing
+  // photos left untouched, see import handler).
+  document.getElementById('export-records')?.addEventListener('click', async () => {
+    const status = document.getElementById('backup-status');
+    const show = (msg, err) => {
+      if (!status) return;
+      if (!msg) { status.style.display = 'none'; return; }
+      status.style.display = 'block';
+      status.style.color = err ? '#991b1b' : '#047857';
+      status.textContent = msg;
+    };
+    let file;
+    try {
+      const json = JSON.stringify({ ...state.data, _format: 'drwessels-backup-records-v1' });
+      file = new File([json], `drwessels-records-${todayISO()}.json`, { type: 'application/json' });
+    } catch (e) {
+      show('Could not prepare backup: ' + (e.message || e), true);
+      return;
+    }
+    await deliverBackup(file, show);
   });
 
   document.getElementById('import-data')?.addEventListener('click', () => {
