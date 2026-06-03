@@ -369,7 +369,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-03 · records-backup';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-03 · summary-title';   // bump on each change; shown in Settings to confirm the loaded version
 
 const DEFAULT_DATA = {
   clinicRates: {
@@ -2376,7 +2376,7 @@ function viewEndOfDay() {
     <div class="screen eod-screen">
       <div class="top-bar">
         <button class="back" data-nav="today">${I.chevronLeft}</button>
-        <div class="title">End of Day</div>
+        <div class="title serif" style="font-size:36px;font-weight:400;text-transform:none;letter-spacing:0;color:#1c1917;">Summary</div>
         <div class="spacer"></div>
       </div>
 
