@@ -372,7 +372,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-03 · breakdown-tap-fix';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-03 · profile-header';   // bump on each change; shown in Settings to confirm the loaded version
 
 const DEFAULT_DATA = {
   clinicRates: {
@@ -1737,19 +1737,17 @@ function viewProfile() {
             <button class="btn" id="delete-client-go" style="background:#991b1b;color:#fafaf9;font-weight:600;">Delete client</button>
           </div>
         </div>
-        <div class="flex" style="gap:14px;margin-bottom:16px;align-items:flex-start;">
-          <div style="flex-shrink:0;text-align:center;">
-            <div class="avatar" style="width:80px;height:80px;font-size:28px;">${(() => { const pid = clientLastPhotoId(c.id); return pid ? `<img alt="" data-photo-id="${pid}">` : monogram(c.firstName, c.lastName); })()}</div>
-            <div style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#a8a29e;margin-top:5px;font-weight:600;">Client</div>
+        <div class="flex" style="gap:16px;margin-bottom:16px;align-items:center;">
+          <div class="avatar" style="width:112px;height:112px;font-size:42px;flex-shrink:0;">${(() => { const pid = clientLastPhotoId(c.id); return pid ? `<img alt="" data-photo-id="${pid}">` : monogram(c.firstName, c.lastName); })()}</div>
+          <div style="flex:1;min-width:0;">
+            <h1 class="serif" style="font-size:32px;font-weight:400;line-height:1.08;">${c.firstName}<br>${c.lastName}</h1>
+            <div style="font-size:15px;color:#78716c;margin-top:6px;">${c.clientSince ? `Client since ${formatDate(c.clientSince)}` : ''}</div>
           </div>
-          <div style="flex-shrink:0;text-align:center;">
-            <button id="consent-thumb" class="avatar consent-thumb" title="Tap to add the consent photo (camera or library)" style="width:80px;height:80px;${c.consentPhotoId ? '' : 'background:#fffbeb;border:1.5px dashed #fcd34d;color:#92400e;'}">${c.consentPhotoId ? `<img alt="Consent photo" data-photo-id="${c.consentPhotoId}">` : I.camera}</button>
-            <div style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#92400e;margin-top:5px;font-weight:600;">Consent</div>
-          </div>
-          <div style="flex:1;padding-top:4px;min-width:0;">
-            <h1 class="serif" style="font-size:30px;font-weight:400;line-height:1.1;">${c.firstName}<br>${c.lastName}</h1>
-            <div style="font-size:15px;color:#78716c;margin-top:5px;">${c.clientSince ? `Client since ${formatDate(c.clientSince)}` : ''}</div>
-          </div>
+        </div>
+
+        <div class="flex" style="gap:12px;align-items:center;margin-bottom:16px;">
+          <button id="consent-thumb" class="avatar consent-thumb" title="Tap to add the consent photo (camera or library)" style="width:64px;height:64px;flex-shrink:0;${c.consentPhotoId ? '' : 'background:#fffbeb;border:1.5px dashed #fcd34d;color:#92400e;'}">${c.consentPhotoId ? `<img alt="Consent photo" data-photo-id="${c.consentPhotoId}">` : I.camera}</button>
+          <div style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#92400e;font-weight:600;">Consent photo</div>
         </div>
 
         <input type="file" id="consent-file" accept="image/*" capture="environment" class="hidden">
