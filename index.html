@@ -379,7 +379,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-03 · clients-az-rail';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-05 · review-column';   // bump on each change; shown in Settings to confirm the loaded version
 
 const DEFAULT_DATA = {
   clinicRates: {
@@ -414,6 +414,19 @@ function mlAreaName(p) { return p === 'SkinVive' ? 'Cheeks' : 'Lips'; }
 // without the "Save anyway?" confirm — used to record a no-charge follow-up.
 const REVIEW_PRODUCTS = ['Botox Review', 'Xeomin Review', 'Relfydess Review'];
 function isReviewProduct(p) { return REVIEW_PRODUCTS.includes(p); }
+// Maps a toxin to its no-charge follow-up Review product. Drives the "+ Review"
+// chip on the most recent treatment in the profile timeline (a review is typically
+// done ~2 weeks after the treatment). Only these three toxins have a review product.
+const REVIEW_CHILD = { Botox: 'Botox Review', Xeomin: 'Xeomin Review', Relfydess: 'Relfydess Review' };
+// Add a number of days to an ISO yyyy-mm-dd date, returning a local-date ISO string
+// (built from local Y/M/D parts, matching todayISO() — avoids UTC drift in NZ).
+function addDaysISO(iso, days) {
+  const [y, m, d] = String(iso).split('-').map(Number);
+  const dt = new Date(y, m - 1, d + days);
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${dt.getFullYear()}-${mm}-${dd}`;
+}
 
 // Each treatment holds up to four photos. None are annotated (drawing was removed
 // from the Treatment slot). Photo image data lives in IndexedDB, keyed by the id
@@ -1195,6 +1208,7 @@ function commitTreatmentDraft(draft) {
   delete record._photoChanged;
   delete record._eraseMode;
   delete record._dirty;
+  delete record._review;  // the review draft is persisted as its own linked record (below)
   delete record.photoId; // drop any legacy single-photo field
 
   const prevPhotos = committedPhotos(draft.id);
@@ -1211,6 +1225,51 @@ function commitTreatmentDraft(draft) {
     const prev = prevPhotos[s.key];
     if (prev && prev !== record.photos[s.key]) deletePhoto(prev).catch(() => {});
   }
+
+  // --- Linked review record (a separate $0-charge follow-up treatment) ---
+  // The Review column on the treatment page is saved as its OWN treatment record
+  // (product 'X Review', reviewOf=this id, its own ~2-week-later date). Keeping it
+  // separate means the Summary/profit/timeline need no changes — a $0-charge review
+  // already counts its product as a small cost/loss (see lineCostProfit).
+  const rev = draft._review;
+  const existingReview = state.data.treatments.find(x => x.reviewOf === record.id);
+  if (rev && rev.product) {
+    const rAreas = {
+      Glabella: parseFloat(rev.areas?.Glabella) || 0,
+      Frontalis: parseFloat(rev.areas?.Frontalis) || 0,
+      "Crow's feet": parseFloat(rev.areas?.["Crow's feet"]) || 0,
+      Masseters: parseFloat(rev.areas?.Masseters) || 0
+    };
+    // Review "other areas" reuse the treatment's labels, aligned by row index.
+    const rOthers = (record.others || []).map((o, i) => ({ label: o.label, units: parseFloat(rev.others?.[i]) || 0 }))
+      .filter(o => o.units > 0);
+    const reviewUnits = Object.values(rAreas).reduce((s, n) => s + n, 0) + rOthers.reduce((s, o) => s + o.units, 0);
+    const reviewRecord = {
+      id: existingReview ? existingReview.id : uid(),
+      clientId: record.clientId,
+      reviewOf: record.id,
+      product: rev.product,
+      date: rev.date || addDaysISO(record.date, 14),
+      areas: rAreas,
+      others: rOthers,
+      totalUnits: reviewUnits,
+      rate: 0,
+      totalCharge: 0,
+      notes: '',
+      photos: { before: null, treatment: null, review: null, dynamic: null },
+      strokes: []
+    };
+    if (existingReview) {
+      const ri = state.data.treatments.findIndex(x => x.id === existingReview.id);
+      state.data.treatments[ri] = reviewRecord;
+    } else {
+      state.data.treatments.push(reviewRecord);
+    }
+  } else if (existingReview) {
+    // Review set back to "None" → drop the linked record.
+    state.data.treatments = state.data.treatments.filter(x => x.id !== existingReview.id);
+  }
+
   saveData();
   return record;
 }
@@ -1869,17 +1928,30 @@ function viewProfile() {
           <div class="empty" style="padding:32px 0;">
             <div class="empty-body">No treatments recorded yet.<br>Tap the button below to record the first one.</div>
           </div>
-        ` : treatments.map((t, i) => `
-          <button class="timeline-item" style="width:100%;text-align:left;background:none;" data-nav="treatment" data-id="${t.id}">
+        ` : treatments.map((t, i) => {
+          // The most recent toxin treatment gets a tappable "+ Review" chip that
+          // starts a no-charge follow-up Review (pre-dated ~2 weeks later). Once a
+          // review is recorded it becomes the most recent treatment — and a Review
+          // product has no REVIEW_CHILD entry — so the chip naturally disappears.
+          const reviewProduct = i === 0 ? REVIEW_CHILD[t.product] : null;
+          // A nested <button> can't live inside a <button>, so the most recent
+          // eligible row is a <div class="timeline-item"> (keeps the connector line
+          // — it's still a non-last sibling) with the chip as a real button inside.
+          const tag = reviewProduct ? 'div' : 'button';
+          return `
+          <${tag} class="timeline-item" style="width:100%;text-align:left;background:none;${reviewProduct ? 'cursor:pointer;' : ''}" data-nav="treatment" data-id="${t.id}">
             <div class="timeline-dot ${i===0?'latest':''}"></div>
             <div class="timeline-content">
-              <div class="timeline-date">${formatDate(t.date, 'full')}</div>
+              <div class="flex items-center justify-between" style="gap:8px;">
+                <div class="timeline-date">${formatDate(t.date, 'full')}</div>
+                ${reviewProduct ? `<button class="review-chip" data-review-from="${t.id}" style="flex-shrink:0;display:inline-flex;align-items:center;gap:4px;padding:5px 12px;border-radius:999px;background:#fef3c7;color:#92400e;font-size:13px;font-weight:700;border:1px solid #fcd34d;">+ Review</button>` : ''}
+              </div>
               <div class="timeline-tx">${t.product}${isMlProduct(t.product) && (t.productDetail||'').trim() ? ` <span style="color:#78716c;">(${escapeHtml(t.productDetail.trim())})</span>` : ''} — <em>${isFlatFeeProduct(t.product) ? '$'+(t.totalCharge||0).toFixed(0) : t.totalUnits+(isMlProduct(t.product)?'ml':'u')}</em></div>
               <div class="timeline-areas">${describeAreas(t)}</div>
             </div>
             ${timelineThumbHTML(t)}
-          </button>
-        `).join('')}
+          </${tag}>
+        `;}).join('')}
       </div>
 
       <button class="fab" data-nav="treatment" data-id="new">${I.plus}<span>New treatment</span></button>
@@ -2020,7 +2092,38 @@ function viewTreatment() {
       t = window._txDraft;
     } else {
       t = JSON.parse(JSON.stringify(saved));
+      // Load any linked review record into the editable review draft (2nd column).
+      const linkedReview = state.data.treatments.find(x => x.reviewOf === saved.id);
+      if (linkedReview) {
+        t._review = {
+          product: linkedReview.product,
+          date: linkedReview.date,
+          areas: {
+            Glabella: linkedReview.areas?.Glabella || 0,
+            Frontalis: linkedReview.areas?.Frontalis || 0,
+            "Crow's feet": linkedReview.areas?.["Crow's feet"] || 0,
+            Masseters: linkedReview.areas?.Masseters || 0
+          },
+          // Re-align the review's other-area units to this treatment's rows by label.
+          others: (saved.others || []).map(o => {
+            const m = (linkedReview.others || []).find(r => r.label === o.label);
+            return m ? String(m.units) : '';
+          })
+        };
+      } else if (window._pendingReviewProduct && ['Botox','Xeomin','Relfydess'].includes(saved.product)) {
+        // Opened via the profile "+ Review" chip → pre-enable the review column.
+        let d = addDaysISO(saved.date, 14);
+        const today = todayISO();
+        if (d > today) d = today;
+        t._review = {
+          product: window._pendingReviewProduct,
+          date: d,
+          areas: { Glabella: 0, Frontalis: 0, "Crow's feet": 0, Masseters: 0 },
+          others: (saved.others || []).map(() => '')
+        };
+      }
     }
+    window._pendingReviewProduct = null;
     client = getClient(t.clientId);
     if (!t.areas) t.areas = { Glabella: 0, Frontalis: 0, "Crow's feet": 0, Masseters: 0 };
   }
@@ -2065,6 +2168,27 @@ function viewTreatment() {
   const unitLabel = isMl ? 'ml' : 'u';
   const photoCount = PHOTO_SLOTS.filter(s => (t.photos || {})[s.key]).length;
 
+  // ---- Review (2-week follow-up) recorded alongside this treatment ----
+  // Reviews apply to toxins only. The review is captured here in a second "Review"
+  // units column but is stored as a SEPARATE linked treatment record (product
+  // 'Botox Review' etc., $0 charge, its own date, reviewOf=<this id>) so the
+  // Summary/profit/timeline all keep working unchanged (a $0-charge review already
+  // shows its product cost as a small loss). t._review is the in-progress draft.
+  const BASE_PRODUCTS = ['Botox', 'Xeomin', 'Relfydess', 'Filler', 'SkinVive', 'Keloid', 'Consultation'];
+  const box1Options = BASE_PRODUCTS.includes(t.product) ? BASE_PRODUCTS : [...BASE_PRODUCTS, t.product];
+  const isToxin = ['Botox', 'Xeomin', 'Relfydess'].includes(t.product);
+  const showReviewControls = isToxin && !isReviewProduct(t.product);
+  const reviewOn = showReviewControls && t._review && t._review.product;
+  // Keep the review's "other areas" column aligned 1:1 with the treatment's rows.
+  if (t._review) {
+    if (!Array.isArray(t._review.others)) t._review.others = [];
+    while (t._review.others.length < t.others.length) t._review.others.push('');
+  }
+  const reviewUnits = reviewOn
+    ? standardAreas.reduce((s, a) => s + (parseFloat(t._review.areas?.[a.key]) || 0), 0)
+      + (t._review.others || []).reduce((s, u) => s + (parseFloat(u) || 0), 0)
+    : 0;
+
   return `
     <div class="screen tx-screen">
       <div class="top-bar">
@@ -2085,14 +2209,32 @@ function viewTreatment() {
           </div>
         </div>
         <div class="px-6 mb-4">
-          <div class="label mb-2">Product</div>
-          <div style="position:relative;">
-            <select class="input" id="product-select" style="appearance:none;-webkit-appearance:none;padding-right:40px;font-weight:700;">
-              ${['Botox','Xeomin','Relfydess','Botox Review','Xeomin Review','Relfydess Review','Filler','SkinVive','Keloid','Consultation'].map(p => `
-                <option value="${p}" ${p===t.product?'selected':''}>${p}</option>
-              `).join('')}
-            </select>
-            <div style="position:absolute;right:16px;top:50%;transform:translateY(-50%);pointer-events:none;color:#a8a29e;">${I.chevronDown}</div>
+          <div class="${showReviewControls ? 'field-row' : ''}">
+            <div>
+              <div class="label mb-2">Product</div>
+              <div style="position:relative;">
+                <select class="input" id="product-select" style="appearance:none;-webkit-appearance:none;padding-right:40px;font-weight:700;">
+                  ${box1Options.map(p => `
+                    <option value="${p}" ${p===t.product?'selected':''}>${p}</option>
+                  `).join('')}
+                </select>
+                <div style="position:absolute;right:16px;top:50%;transform:translateY(-50%);pointer-events:none;color:#a8a29e;">${I.chevronDown}</div>
+              </div>
+            </div>
+            ${showReviewControls ? `
+            <div>
+              <div class="label mb-2">Review</div>
+              <div style="position:relative;">
+                <select class="input" id="review-select" style="appearance:none;-webkit-appearance:none;padding-right:40px;font-weight:700;">
+                  <option value="" ${!reviewOn?'selected':''}>None</option>
+                  ${REVIEW_PRODUCTS.map(p => `
+                    <option value="${p}" ${(t._review&&t._review.product)===p?'selected':''}>${p}</option>
+                  `).join('')}
+                </select>
+                <div style="position:absolute;right:16px;top:50%;transform:translateY(-50%);pointer-events:none;color:#a8a29e;">${I.chevronDown}</div>
+              </div>
+            </div>
+            ` : ''}
           </div>
         </div>
 
@@ -2104,8 +2246,18 @@ function viewTreatment() {
         ` : ''}
 
         <div class="px-6 mb-4">
-          <div class="label mb-2">Treatment date</div>
-          <input type="date" class="input" id="tx-date" value="${t.date || todayISO()}" max="${todayISO()}">
+          <div class="${reviewOn ? 'field-row' : ''}">
+            <div>
+              <div class="label mb-2">Treatment date</div>
+              <input type="date" class="input" id="tx-date" value="${t.date || todayISO()}" max="${todayISO()}">
+            </div>
+            ${reviewOn ? `
+            <div>
+              <div class="label mb-2">Review date</div>
+              <input type="date" class="input" id="tx-review-date" value="${t._review.date || todayISO()}" max="${todayISO()}">
+            </div>
+            ` : ''}
+          </div>
         </div>
 
         ${!isFlat ? `
@@ -2158,10 +2310,24 @@ function viewTreatment() {
             </div>
           </div>
           ` : `
+          ${reviewOn ? `
+          <div style="display:grid;grid-template-columns:1fr 92px 92px;align-items:flex-end;column-gap:8px;">
+            <div class="amber-label">Summary</div>
+            <div style="text-align:right;">
+              <div class="amber-label" style="color:#78716c;">Treatment</div>
+              <div class="serif" style="font-size:24px;font-weight:700;"><span id="total-units">${totalUnits}</span><span style="font-size:13px;color:#78716c;font-style:italic;font-weight:700;"> u</span></div>
+            </div>
+            <div style="text-align:right;">
+              <div class="amber-label">Review</div>
+              <div class="serif" style="font-size:24px;font-weight:700;color:#92400e;"><span id="review-units">${reviewUnits}</span><span style="font-size:13px;color:#78716c;font-style:italic;font-weight:700;"> u</span></div>
+            </div>
+          </div>
+          ` : `
           <div style="display:grid;grid-template-columns:1fr 1fr;align-items:baseline;column-gap:12px;">
             <div class="amber-label">${isMl ? 'Area' : 'Summary'}</div>
             <div class="serif" style="font-size:28px;font-weight:700;"><span id="total-units">${totalUnits}</span> <span style="font-size:15px;color:#78716c;font-style:italic;font-weight:700;">${isMl?'ml':'units'}</span></div>
           </div>
+          `}
 
           <div class="mt-3">
             ${isMl ? `
@@ -2173,27 +2339,39 @@ function viewTreatment() {
                 </div>
               </div>
             ` : standardAreas.map(a => `
-              <div class="area-row" data-area="${a.key}">
+              <div class="area-row" data-area="${a.key}"${reviewOn?' style="grid-template-columns:1fr 92px 92px;column-gap:8px;"':''}>
                 <span class="area-label ${(t.areas[a.key]||0)===0?'muted':''}">${a.name}</span>
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2" style="justify-content:flex-end;">
                   <input type="number" class="area-input area-units-input" data-key="${a.key}" value="${t.areas[a.key]||''}" placeholder="0" min="0" step="1" inputmode="decimal">
                   <span class="area-value ${(t.areas[a.key]||0)===0?'muted':''}">${unitLabel}</span>
                 </div>
+                ${reviewOn ? `
+                <div class="flex items-center gap-2" style="justify-content:flex-end;">
+                  <input type="number" class="area-input review-units-input" data-key="${a.key}" value="${t._review.areas?.[a.key]||''}" placeholder="0" min="0" step="1" inputmode="numeric">
+                  <span class="area-value ${(t._review.areas?.[a.key]||0)===0?'muted':''}">u</span>
+                </div>
+                ` : ''}
               </div>
             `).join('')}
 
             ${!isMl ? `
               <div style="font-size:13px;letter-spacing:0.2em;text-transform:uppercase;color:#78716c;font-weight:700;margin-top:14px;margin-bottom:4px;">Other areas</div>
               ${(t.others || []).map((o, i) => `
-                <div class="other-row">
+                <div class="other-row"${reviewOn?' style="grid-template-columns:1fr 92px 92px;column-gap:8px;"':''}>
                   <div class="other-left">
                     <span class="other-prefix">${i+1}.</span>
-                    <input type="text" class="other-label-input other-label" data-index="${i}" value="${o.label||''}" placeholder="${['e.g. DAO','e.g. Mentalis','e.g. Bunny lines'][i]}">
+                    <input type="text" class="other-label-input other-label" data-index="${i}" value="${o.label||''}" placeholder="${['e.g. DAO','e.g. Mentalis','e.g. Bunny lines'][i]||'e.g. area'}">
                   </div>
-                  <div class="other-units">
+                  <div class="other-units" style="justify-content:flex-end;">
                     <input type="number" class="area-input other-units-input" data-index="${i}" value="${o.units||''}" placeholder="0" min="0" step="1" inputmode="numeric">
                     <span class="u ${!o.units?'u-empty':''}">u</span>
                   </div>
+                  ${reviewOn ? `
+                  <div class="other-units" style="justify-content:flex-end;">
+                    <input type="number" class="area-input review-other-input" data-index="${i}" value="${t._review.others?.[i]||''}" placeholder="0" min="0" step="1" inputmode="numeric">
+                    <span class="u ${!t._review.others?.[i]?'u-empty':''}">u</span>
+                  </div>
+                  ` : ''}
                 </div>
               `).join('')}
             ` : ''}
@@ -2205,9 +2383,15 @@ function viewTreatment() {
               ${isOverridden ? `<button class="rate-edit-btn" id="reset-rate" style="font-size:13px;letter-spacing:.15em;text-transform:uppercase;color:#78716c;font-weight:700;">${I.rotate} Reset</button>` : ''}
             </div>
             <div class="rate-row">
-              <span class="muted">Total ${isMl?'volume':'units'}</span>
+              <span class="muted">${reviewOn ? 'Treatment units' : `Total ${isMl?'volume':'units'}`}</span>
               <span style="font-weight:700;"><span id="billing-units">${totalUnits}</span>${unitLabel}</span>
             </div>
+            ${reviewOn ? `
+            <div class="rate-row">
+              <span class="muted">Review units</span>
+              <span style="font-weight:700;"><span id="billing-review-units">${reviewUnits}</span>u <span style="font-weight:400;color:#a8a29e;font-size:13px;">no charge</span></span>
+            </div>
+            ` : ''}
             <div class="rate-row">
               <span class="muted">Rate per ${isMl?'ml':'unit'}</span>
               <div class="flex items-center gap-2">
@@ -3231,6 +3415,23 @@ function setupProfile() {
     consentFileLib.addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; commitConsent(f); });
   }
 
+  // "+ Review" chip on the most recent treatment: open that treatment with its
+  // Review column pre-enabled (the review is recorded alongside the treatment and
+  // saved as a linked $0-charge record — see commitTreatmentDraft). stopPropagation
+  // keeps the tap off the row's own data-nav (open-treatment) handler.
+  document.querySelectorAll('[data-review-from]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const tx = state.data.treatments.find(x => x.id === btn.dataset.reviewFrom);
+      if (!tx) return;
+      const reviewProduct = REVIEW_CHILD[tx.product];
+      if (!reviewProduct) return;
+      window._pendingReviewProduct = reviewProduct;   // viewTreatment pre-enables the review
+      setView('treatment', { treatmentId: tx.id });
+    });
+  });
+
   // Timeline thumbnails are populated by loadPhotoThumbnails(), called from render().
 }
 
@@ -3426,7 +3627,51 @@ function setupTreatment() {
     }
     t.product = newProduct;
     t.rateOverride = null;
+    // Reviews only apply to toxins; switching to Filler/SkinVive/Keloid/Consultation
+    // (or a Review product itself) drops any in-progress review draft.
+    if (!['Botox','Xeomin','Relfydess'].includes(newProduct)) t._review = null;
     render();
+  });
+
+  // Review (2-week follow-up) controls — second dropdown + Review units column.
+  document.getElementById('review-select')?.addEventListener('change', (e) => {
+    const val = e.target.value;
+    if (!val) {
+      t._review = null;                 // "None"
+    } else if (t._review) {
+      t._review.product = val;          // switch review product, keep entered units
+    } else {
+      let d = addDaysISO(t.date || todayISO(), 14);   // default ~2 weeks after the treatment
+      const today = todayISO();
+      if (d > today) d = today;                        // never a future date
+      t._review = {
+        product: val,
+        date: d,
+        areas: { Glabella: 0, Frontalis: 0, "Crow's feet": 0, Masseters: 0 },
+        others: (t.others || []).map(() => '')
+      };
+    }
+    t._dirty = true;
+    render();
+  });
+  document.getElementById('tx-review-date')?.addEventListener('change', (e) => {
+    if (t._review && e.target.value) t._review.date = e.target.value;
+  });
+  document.querySelectorAll('.review-units-input').forEach(inp => {
+    inp.addEventListener('input', () => {
+      if (!t._review) return;
+      if (!t._review.areas) t._review.areas = {};
+      t._review.areas[inp.dataset.key] = parseFloat(inp.value) || 0;
+      recalcTotals();
+    });
+  });
+  document.querySelectorAll('.review-other-input').forEach(inp => {
+    inp.addEventListener('input', () => {
+      if (!t._review) return;
+      if (!Array.isArray(t._review.others)) t._review.others = [];
+      t._review.others[parseInt(inp.dataset.index)] = inp.value;
+      recalcTotals();
+    });
   });
 
   // Batch number & reconstitution date
@@ -3869,7 +4114,8 @@ function setupTreatment() {
       if (t.photos && t.photos[s.key]) ids.add(t.photos[s.key]);
     }
     for (const id of ids) await deletePhoto(id).catch(() => {});
-    state.data.treatments = state.data.treatments.filter(x => x.id !== t.id);
+    // Drop this treatment AND any linked review record (so no orphan is left behind).
+    state.data.treatments = state.data.treatments.filter(x => x.id !== t.id && x.reviewOf !== t.id);
     window._txDraft = null;
     saveData();
     setView('profile', { clientId: t.clientId });
@@ -3897,6 +4143,16 @@ function recalcTotals() {
   document.getElementById('charge-formula').textContent = `${totalUnits}${unitLabel} × $${rate.toFixed(2)}`;
   document.getElementById('total-charge-big').textContent = Math.floor(totalCharge).toLocaleString();
   document.getElementById('total-charge-cents').textContent = totalCharge.toFixed(2).split('.')[1];
+
+  // Review column total (a separate no-charge follow-up; charge is unaffected).
+  if (t._review && t._review.product) {
+    const reviewTotal = ['Glabella','Frontalis',"Crow's feet",'Masseters'].reduce((s, k) => s + (parseFloat(t._review.areas?.[k]) || 0), 0)
+      + (t._review.others || []).reduce((s, u) => s + (parseFloat(u) || 0), 0);
+    const ru = document.getElementById('review-units');
+    const bru = document.getElementById('billing-review-units');
+    if (ru) ru.textContent = reviewTotal;
+    if (bru) bru.textContent = reviewTotal;
+  }
 
   // Update muted class on area labels/units dynamically
   document.querySelectorAll('.area-row').forEach(row => {
