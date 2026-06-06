@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-06 · cream-scheme';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-06 · cream-treatment';   // bump on each change; shown in Settings to confirm the loaded version
 
 const DEFAULT_DATA = {
   clinicRates: {
@@ -2208,7 +2208,7 @@ function viewTreatment() {
     : 0;
 
   return `
-    <div class="screen tx-screen">
+    <div class="screen tx-screen cream-screen">
       <div class="top-bar">
         <button class="back" data-nav="${isNew ? 'profile' : 'today'}" data-id="${client.id}">${I.chevronLeft}</button>
         <div class="title-center">
