@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-07 · lanree-cdn-fix';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-07 · lanree-msal-local';   // bump on each change; shown in Settings to confirm the loaded version
 
 const DEFAULT_DATA = {
   clinicRates: {
@@ -4919,17 +4919,28 @@ function findLanreeRow(values, slotDecimal, firstDataRow) {
 }
 
 // ---- MSAL (sign-in) ----
+// Load MSAL from our OWN site first (same origin as the app — always reachable,
+// works offline once cached), falling back to the CDN only if that 404s.
+const MSAL_SRCS = [
+  'msal-browser.min.js',
+  'https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.4/lib/msal-browser.min.js'
+];
 let _msalLoadP = null;
 function loadMsal() {
   if (window.msal) return Promise.resolve();
   if (_msalLoadP) return _msalLoadP;
   _msalLoadP = new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.4/lib/msal-browser.min.js';
-    s.async = true;
-    s.onload = () => resolve();
-    s.onerror = () => { _msalLoadP = null; reject(new Error('Could not load the sign-in library — are you online?')); };
-    document.head.appendChild(s);
+    let i = 0;
+    const tryNext = () => {
+      if (i >= MSAL_SRCS.length) { _msalLoadP = null; reject(new Error('Could not load the sign-in library — are you online?')); return; }
+      const s = document.createElement('script');
+      s.async = true;
+      s.src = MSAL_SRCS[i++];
+      s.onload = () => resolve();
+      s.onerror = () => { s.remove(); tryNext(); };
+      document.head.appendChild(s);
+    };
+    tryNext();
   });
   return _msalLoadP;
 }
