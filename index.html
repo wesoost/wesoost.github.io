@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-06 · lanree-sync';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-07 · lanree-cdn-fix';   // bump on each change; shown in Settings to confirm the loaded version
 
 const DEFAULT_DATA = {
   clinicRates: {
@@ -4925,7 +4925,7 @@ function loadMsal() {
   if (_msalLoadP) return _msalLoadP;
   _msalLoadP = new Promise((resolve, reject) => {
     const s = document.createElement('script');
-    s.src = 'https://alcdn.msauth.net/browser/2.38.4/js/msal-browser.min.js';
+    s.src = 'https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.4/lib/msal-browser.min.js';
     s.async = true;
     s.onload = () => resolve();
     s.onerror = () => { _msalLoadP = null; reject(new Error('Could not load the sign-in library — are you online?')); };
