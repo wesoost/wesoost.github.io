@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-07 · lanree-msal-local';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-07 · lanree-file-fix';   // bump on each change; shown in Settings to confirm the loaded version
 
 const DEFAULT_DATA = {
   clinicRates: {
@@ -4858,7 +4858,7 @@ const GRAPH = 'https://graph.microsoft.com/v1.0';
 const MSAL_SCOPES = ['Files.ReadWrite'];
 
 function lanreeCfg() {
-  const def = { clientId: '', itemId: '', fileName: '', query: 'Lanree', enabled: false, account: '' };
+  const def = { clientId: '', itemId: '', fileName: '', query: 'Lanree', enabled: false, account: '', folderId: '' };
   try { return { ...def, ...(JSON.parse(localStorage.getItem(LANREE_CFG_KEY) || '{}')) }; }
   catch { return def; }
 }
@@ -5011,16 +5011,39 @@ async function graph(path, token, opts = {}) {
   return res.status === 204 ? null : res.json();
 }
 
-// Locate the workbook in OneDrive by name; stores + returns its driveItem id.
+// Locate the workbook in OneDrive and store its driveItem id. Tries, in order:
+// (1) exact path at the drive root (instant — no search-index lag, which matters
+// for a just-created test copy); (2) by name inside a known folder (the real
+// file's folder, where the test copy also lives); (3) a whole-drive search.
 async function lanreeResolveFile() {
   const cfg = lanreeCfg();
   const token = await lanreeToken();
-  const data = await graph(`/me/drive/root/search(q='${encodeURIComponent(cfg.query || 'Lanree')}')?$select=id,name`, token);
+  const want = (cfg.fileName || '').toLowerCase();
+  const adopt = (item) => { saveLanreeCfg({ itemId: item.id, fileName: item.name, folderId: (item.parentReference && item.parentReference.id) || cfg.folderId || '' }); return item; };
+
+  // 1) Exact path at the drive root.
+  if (cfg.fileName) {
+    try { return adopt(await graph(`/me/drive/root:/${encodeURIComponent(cfg.fileName)}?$select=id,name,parentReference`, token)); }
+    catch (e) { if (e.status !== 404) throw e; }
+  }
+  // 2) By name inside a known folder — the last-known folder, or (if none) the
+  // folder of the currently-stored item, since a test copy sits beside the original.
+  let folderId = cfg.folderId;
+  if (want && !folderId && cfg.itemId) {
+    try { const cur = await graph(`/me/drive/items/${cfg.itemId}?$select=parentReference`, token); folderId = (cur.parentReference && cur.parentReference.id) || ''; } catch {}
+  }
+  if (want && folderId) {
+    try {
+      const kids = await graph(`/me/drive/items/${folderId}/children?$select=id,name,parentReference`, token);
+      const hit = (kids.value || []).find(f => f.name.toLowerCase() === want);
+      if (hit) return adopt(hit);
+    } catch {}
+  }
+  // 3) Whole-drive search (may lag for brand-new files).
+  const data = await graph(`/me/drive/root/search(q='${encodeURIComponent(cfg.query || 'Lanree')}')?$select=id,name,parentReference`, token);
   const xlsx = (data.value || []).filter(f => /\.xlsx$/i.test(f.name));
-  if (!xlsx.length) throw new Error(`No .xlsx matching "${cfg.query}" in your OneDrive.`);
-  const pick = (cfg.fileName && xlsx.find(f => f.name.toLowerCase() === cfg.fileName.toLowerCase())) || xlsx[0];
-  saveLanreeCfg({ itemId: pick.id, fileName: pick.name });
-  return pick;
+  if (!xlsx.length) throw new Error(`No .xlsx matching “${cfg.query}” in your OneDrive yet — a brand-new file can take a few minutes to be searchable.`);
+  return adopt((want && xlsx.find(f => f.name.toLowerCase() === want)) || xlsx[0]);
 }
 
 const lanreeWsPath = (itemId, name) => `/me/drive/items/${itemId}/workbook/worksheets('${encodeURIComponent(name)}')`;
@@ -5109,7 +5132,14 @@ function setupLanree() {
   });
 
   document.getElementById('lanree-findfile')?.addEventListener('click', async () => {
-    setStatus('Searching OneDrive…');
+    // Adopt whatever's typed in the file field and force a fresh lookup, so the
+    // user doesn't have to remember to tap Save first to re-point the file.
+    const fileName = document.getElementById('lanree-filename').value.trim();
+    const query = fileName ? fileName.replace(/\.xlsx$/i, '') : 'Lanree';
+    // Keep itemId/folderId so resolve can derive the folder and find the copy
+    // as a sibling of the currently-known file; resolve overwrites them on success.
+    saveLanreeCfg({ fileName, query });
+    setStatus('Looking for the file…');
     try { const f = await lanreeResolveFile(); setStatus(`Found “${f.name}”. Ready to send.`, true); }
     catch (e) { setStatus(e.message, false); }
   });
