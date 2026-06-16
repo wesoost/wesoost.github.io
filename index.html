@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-16 · client-clinic';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-16 · clinic-default-lanree';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -1854,8 +1854,7 @@ function viewProfile() {
           <div style="min-width:120px;">
             <label for="client-clinic" style="display:block;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#92400e;font-weight:600;margin-bottom:3px;">Clinic</label>
             <select id="client-clinic" style="width:100%;padding:8px 10px;border:1px solid #e7e5e4;border-radius:8px;background:#fff;font-size:14px;color:#1c1917;">
-              <option value="">—</option>
-              ${CLINIC_LOCATIONS.map(loc => `<option value="${loc}"${c.clinic === loc ? ' selected' : ''}>${loc}</option>`).join('')}
+              ${CLINIC_LOCATIONS.map(loc => `<option value="${loc}"${(c.clinic || 'Lanree') === loc ? ' selected' : ''}>${loc}</option>`).join('')}
             </select>
           </div>
         </div>
@@ -3379,7 +3378,7 @@ function setupNewClientForm() {
       state.editClientId = null;
       setView('profile', { clientId: id });
     } else {
-      const client = { id: uid(), ...fields, rates: {}, clientSince: todayISO() };
+      const client = { id: uid(), ...fields, rates: {}, clinic: 'Lanree', clientSince: todayISO() };
       state.data.clients.push(client);
       saveData();
       setView('profile', { clientId: client.id });
