@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-16 · update-banner-bottom';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-16 · clinic-commission';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -2555,31 +2555,56 @@ function viewRates() {
 }
 
 // ---------- END OF DAY ----------
-// Per-product Cost & Profit for the Summary breakdowns.
+// Cost & Profit for the Summary breakdowns.
 //   cost   = total units × the clinic's cost per unit (clinicRates[p].cost).
 //            Flat-fee services (Keloid/Consultation) have 0 units so this is $0,
 //            matching their $0 cost.
-//   profit = (charge ÷ 1.15) × 0.75 − cost — matches the Lanree spreadsheet's
-//            "To Dr" column. Strip 15% GST off the charge (→ "After 15% Tax"), keep
-//            75% (Lanree Aesthetic takes a 25% commission for supplying clients via
-//            their booking system, recalls and end-of-month charging → "Clinic 75%"),
-//            THEN subtract the full product cost — the clinic absorbs 100% of cost,
-//            commission applies to revenue only. LANREE_KEEP is that 0.75 share.
+//   profit = (charge ÷ 1.15) × clinic-keep − cost. Strip 15% GST off the charge
+//            (→ "After 15% Tax"), keep the clinic's share, THEN subtract the full
+//            product cost — the clinic absorbs 100% of cost; commission (when any)
+//            applies to revenue only. At LANREE the keep is 0.75 (Lanree Aesthetic
+//            takes a 25% commission for supplying clients via their booking system,
+//            recalls and end-of-month charging → matches the sheet's "To Dr" col);
+//            Coromandel and Phuri take NO commission, so the keep is 1.00.
 //            A $0-charge review naturally yields −cost (a loss), as the sheet shows.
 const LANREE_KEEP = 0.75;
-function lineCostProfit(product, units, revenue) {
+// Each clinic's share of revenue after GST: Lanree takes a 25% commission (keep
+// 0.75, for supplying clients/booking/recalls/charging); Coromandel and Phuri
+// take none, so the doctor keeps 100%. Unknown clinics default to Lanree's share.
+const CLINIC_KEEP = { Lanree: 0.75, Coromandel: 1, Phuri: 1 };
+function clinicKeep(clinic) { return CLINIC_KEEP[clinic] != null ? CLINIC_KEEP[clinic] : LANREE_KEEP; }
+
+// Per-CLIENT cost & profit (used by the breakdown pop-up, where every row is one
+// client → one clinic, so a single `keep` factor is correct).
+function lineCostProfit(product, units, revenue, keep = LANREE_KEEP) {
   const r = state.data.clinicRates[product];
-  const costPerUnit = (r && r.cost) || 0;
-  const cost = units * costPerUnit;
-  const profit = (revenue / 1.15) * LANREE_KEEP - cost;
+  const cost = units * ((r && r.cost) || 0);
+  const profit = (revenue / 1.15) * keep - cost;
   return { cost, profit };
+}
+// Cost & profit for an aggregated product row. `net` is the after-GST, after-
+// commission amount accumulated PER treatment (each at its own clinic's keep), so
+// a product spanning clinics with different commissions (the "All clinics" view)
+// is still correct; cost is units × the clinic cost per unit (commission-free).
+function aggCostProfit(product, units, net) {
+  const r = state.data.clinicRates[product];
+  const cost = units * ((r && r.cost) || 0);
+  return { cost, profit: net - cost };
 }
 // Display helpers for a profit value: a loss (negative — e.g. a $0-charge review
 // that consumed product) shows as "−$12" in red; zero/positive as "$12" in green.
 function profitColor(p) { return p < 0 ? '#dc2626' : '#047857'; }
 function profitText(p) { return (p < 0 ? '−$' : '$') + Math.abs(p).toFixed(0); }
-// Footnote shown under the Profit breakdowns so the maths is transparent.
-const PROFIT_FORMULA_NOTE = `<div style="font-size:12px;color:#a8a29e;font-style:italic;line-height:1.5;margin-top:8px;">Profit = (charge ÷ 1.15) × 0.75 − cost — strip 15% GST, keep 75% after Lanree's 25% commission, then subtract product cost. $0-charge reviews show the product cost as a loss.</div>`;
+// Footnote under the Profit breakdowns — wording adapts to the selected clinic,
+// since the 25% commission only applies at Lanree.
+function profitFormulaNote(clinic) {
+  const wrap = (s) => `<div style="font-size:12px;color:#a8a29e;font-style:italic;line-height:1.5;margin-top:8px;">${s} $0-charge reviews show the product cost as a loss.</div>`;
+  if (clinic === 'Coromandel' || clinic === 'Phuri')
+    return wrap(`Profit = (charge ÷ 1.15) − cost — strip 15% GST, then subtract product cost (no commission at ${clinic}).`);
+  if (clinic === 'Lanree')
+    return wrap(`Profit = (charge ÷ 1.15) × 0.75 − cost — strip 15% GST, keep 75% after Lanree's 25% commission, then subtract product cost.`);
+  return wrap(`Profit = (charge ÷ 1.15) × clinic share − cost — strip 15% GST, keep the clinic's share (Lanree 75% after a 25% commission; Coromandel & Phuri 100%), then subtract product cost.`);
+}
 
 // A treatment's clinic = its client's clinic (default Lanree). Used to filter the
 // Summary by location so each clinic's finances can be viewed on their own.
@@ -2596,16 +2621,18 @@ function viewEndOfDay() {
 
   const byProduct = {};
   txs.forEach(t => {
-    if (!byProduct[t.product]) byProduct[t.product] = { count: 0, units: 0, revenue: 0 };
+    if (!byProduct[t.product]) byProduct[t.product] = { count: 0, units: 0, revenue: 0, net: 0 };
     byProduct[t.product].count++;
     byProduct[t.product].units += t.totalUnits || 0;
     byProduct[t.product].revenue += t.totalCharge || 0;
+    byProduct[t.product].net += ((t.totalCharge || 0) / 1.15) * clinicKeep(txClinic(t));
   });
   // Day totals for the cost/profit columns — sum the per-line values (profit is
-  // piecewise: charged lines use the Lanree formula, $0-charge lines are −cost).
+  // piecewise: charged lines use the after-GST/after-commission net, $0-charge
+  // lines are −cost; commission depends on each treatment's clinic).
   let dayCost = 0, dayProfit = 0;
   Object.entries(byProduct).forEach(([p, d]) => {
-    const cp = lineCostProfit(p, d.units, d.revenue);
+    const cp = aggCostProfit(p, d.units, d.net);
     dayCost += cp.cost; dayProfit += cp.profit;
   });
 
@@ -2627,13 +2654,14 @@ function viewEndOfDay() {
 
   const rangeByProduct = {};
   rangeTxs.forEach(t => {
-    if (!rangeByProduct[t.product]) rangeByProduct[t.product] = { units: 0, revenue: 0 };
+    if (!rangeByProduct[t.product]) rangeByProduct[t.product] = { units: 0, revenue: 0, net: 0 };
     rangeByProduct[t.product].units += t.totalUnits || 0;
     rangeByProduct[t.product].revenue += t.totalCharge || 0;
+    rangeByProduct[t.product].net += ((t.totalCharge || 0) / 1.15) * clinicKeep(txClinic(t));
   });
   let rangeCost = 0, rangeProfit = 0;
   Object.entries(rangeByProduct).forEach(([p, d]) => {
-    const cp = lineCostProfit(p, d.units, d.revenue);
+    const cp = aggCostProfit(p, d.units, d.net);
     rangeCost += cp.cost; rangeProfit += cp.profit;
   });
 
@@ -2670,7 +2698,7 @@ function viewEndOfDay() {
                 <div class="label" style="width:64px;text-align:right;">Profit</div>
               </div>
               ${Object.entries(byProduct).map(([p, d], i, arr) => {
-                const { cost, profit } = lineCostProfit(p, d.units, d.revenue);
+                const { cost, profit } = aggCostProfit(p, d.units, d.net);
                 return `
                 <div class="bd-row" data-bd="${escapeHtml(p)}" data-bd-start="${today}" data-bd-end="${today}" style="padding:12px 16px;display:flex;align-items:center;gap:10px;cursor:pointer;${i<arr.length-1?'border-bottom:1px solid #f5f5f4;':''}">
                   <div style="width:4px;height:36px;border-radius:2px;background:${productColor(p)};flex-shrink:0;"></div>
@@ -2692,7 +2720,7 @@ function viewEndOfDay() {
                 <div style="width:64px;text-align:right;font-size:15px;font-weight:700;color:${profitColor(dayProfit)};">${profitText(dayProfit)}</div>
               </div>
             </div>
-            ${PROFIT_FORMULA_NOTE}
+            ${profitFormulaNote(clinicFilter)}
           </div>
         ` : `
           <div class="empty" style="padding:24px 0;">
@@ -2746,7 +2774,7 @@ function viewEndOfDay() {
             </div>
             <div style="display:flex;flex-direction:column;gap:9px;">
               ${Object.entries(rangeByProduct).map(([p, d]) => {
-                const { cost, profit } = lineCostProfit(p, d.units, d.revenue);
+                const { cost, profit } = aggCostProfit(p, d.units, d.net);
                 return `
                 <div class="bd-row flex items-center" data-bd="${escapeHtml(p)}" data-bd-start="${rStart}" data-bd-end="${rEnd}" style="gap:10px;cursor:pointer;padding:3px 0;">
                   <div style="width:4px;height:30px;border-radius:2px;background:${productColor(p)};flex-shrink:0;"></div>
@@ -2768,7 +2796,7 @@ function viewEndOfDay() {
               <div style="width:58px;text-align:right;font-size:14px;font-weight:700;color:#78716c;">$${rangeCost.toFixed(0)}</div>
               <div style="width:58px;text-align:right;font-size:14px;font-weight:700;color:${profitColor(rangeProfit)};">${profitText(rangeProfit)}</div>
             </div>
-            ${PROFIT_FORMULA_NOTE}
+            ${profitFormulaNote(clinicFilter)}
           ` : `
             <div style="margin-top:14px;font-size:15px;color:#a8a29e;text-align:center;">No treatments in this period.</div>
           `}
@@ -3227,7 +3255,8 @@ function openProductBreakdown(product, startISO, endISO) {
   const rows = Object.entries(byClient).map(([id, d]) => {
     const c = getClient(id);
     const name = c ? (`${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Unnamed client') : 'Unknown client';
-    const { profit } = lineCostProfit(product, d.units, d.revenue);
+    const keep = clinicKeep(c ? (c.clinic || 'Lanree') : 'Lanree');
+    const { profit } = lineCostProfit(product, d.units, d.revenue, keep);
     return { clientId: c ? c.id : null, name, profit, ...d };
   }).sort((a, b) => b.revenue - a.revenue || b.units - a.units);
 
