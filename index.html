@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-16 · clinic-default-lanree';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-16 · clinic-backfill';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -523,6 +523,16 @@ function migrateClinicRates(data) {
       const r = data.clinicRates[rev], pr = data.clinicRates[parent];
       if (r && pr && pr.cost && !r.cost) r.cost = pr.cost;
     }
+  }
+  return data;
+}
+
+// One-time backfill: every client gets a clinic, defaulting to Lanree (the main
+// location). Older saves predate the clinic field, so without this they'd show
+// Lanree in the dropdown but have nothing stored on the record.
+function migrateClientClinic(data) {
+  if (data && Array.isArray(data.clients)) {
+    data.clients.forEach(c => { if (!c.clinic) c.clinic = 'Lanree'; });
   }
   return data;
 }
@@ -834,7 +844,7 @@ function loadData() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return structuredClone(DEFAULT_DATA);
     const parsed = JSON.parse(raw);
-    return migrateClinicRates(migrateAllTreatments({ ...structuredClone(DEFAULT_DATA), ...parsed }));
+    return migrateClientClinic(migrateClinicRates(migrateAllTreatments({ ...structuredClone(DEFAULT_DATA), ...parsed })));
   } catch (e) {
     console.error('Failed to load data', e);
     return structuredClone(DEFAULT_DATA);
@@ -4773,7 +4783,7 @@ function setupSettings() {
         }
       }
       const { photos: _omitPhotos, _format, ...data } = imported;
-      state.data = migrateClinicRates(migrateAllTreatments({ ...structuredClone(DEFAULT_DATA), ...data }));
+      state.data = migrateClientClinic(migrateClinicRates(migrateAllTreatments({ ...structuredClone(DEFAULT_DATA), ...data })));
       saveData();
       markBackupNow();   // the file just imported is itself an off-device copy
       render();
@@ -5181,6 +5191,8 @@ function setupLanree() {
 //   BOOTSTRAP
 // ================================================================
 document.addEventListener('DOMContentLoaded', () => {
+  saveData();   // persist any boot-time migrations (e.g. clinic backfill) durably
+
   // First run - show welcome briefly
   if (state.data.clients.length === 0 && !localStorage.getItem('welcomed')) {
     document.getElementById('app').innerHTML = `
