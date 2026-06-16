@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-07 · lanree-file-fix';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-16 · lanree-reconnect-fix';   // bump on each change; shown in Settings to confirm the loaded version
 
 const DEFAULT_DATA = {
   clinicRates: {
@@ -4978,7 +4978,18 @@ async function lanreeBootAuth() {
 async function lanreeConnect() {
   const app = await getMsalApp();
   const acct = app.getAllAccounts()[0];
-  if (acct) return acct;                              // already signed in
+  if (acct) {
+    // An account record lingers in the cache even after the refresh token has
+    // expired, so its mere presence doesn't mean we're still signed in. Verify
+    // with a silent token; only treat it as connected if that actually works.
+    try {
+      await app.acquireTokenSilent({ scopes: MSAL_SCOPES, account: acct });
+      return acct;                                            // genuinely signed in
+    } catch {
+      await app.loginRedirect({ scopes: MSAL_SCOPES, loginHint: acct.username });
+      return;                                                 // navigates away
+    }
+  }
   await app.loginRedirect({ scopes: MSAL_SCOPES });   // navigates away
 }
 
