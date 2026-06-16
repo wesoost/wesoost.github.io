@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-16 · clinic-backfill';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-16 · clinic-summary-filter';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -1720,6 +1720,7 @@ function viewClients() {
                 <div class="list-meta">
                   ${last ? `Last: ${formatDate(last.date)}` : 'No treatments yet'}
                   <span class="dot"></span>${txCount} tx
+                  <span class="dot"></span>${c.clinic || 'Lanree'}
                 </div>
               </div>
               ${I.chevronRight}
@@ -2580,9 +2581,17 @@ function profitText(p) { return (p < 0 ? '−$' : '$') + Math.abs(p).toFixed(0);
 // Footnote shown under the Profit breakdowns so the maths is transparent.
 const PROFIT_FORMULA_NOTE = `<div style="font-size:12px;color:#a8a29e;font-style:italic;line-height:1.5;margin-top:8px;">Profit = (charge ÷ 1.15) × 0.75 − cost — strip 15% GST, keep 75% after Lanree's 25% commission, then subtract product cost. $0-charge reviews show the product cost as a loss.</div>`;
 
+// A treatment's clinic = its client's clinic (default Lanree). Used to filter the
+// Summary by location so each clinic's finances can be viewed on their own.
+function txClinic(t) { const c = getClient(t.clientId); return (c && c.clinic) || 'Lanree'; }
+
 function viewEndOfDay() {
   const today = todayISO();
-  const txs = state.data.treatments.filter(t => t.date === today);
+  // Optional clinic filter (state.eodClinic; '' = all clinics) applied to every
+  // figure on the page so the Summary reflects one location at a time.
+  const clinicFilter = state.eodClinic || '';
+  const matchClinic = (t) => !clinicFilter || txClinic(t) === clinicFilter;
+  const txs = state.data.treatments.filter(t => t.date === today && matchClinic(t));
   const gross = txs.reduce((s, t) => s + (t.totalCharge || 0), 0);
 
   const byProduct = {};
@@ -2611,7 +2620,7 @@ function viewEndOfDay() {
     return s === rStart && e === rEnd;
   }) || [null])[0];
 
-  const rangeTxs = state.data.treatments.filter(t => t.date >= rStart && t.date <= rEnd);
+  const rangeTxs = state.data.treatments.filter(t => t.date >= rStart && t.date <= rEnd && matchClinic(t));
   const rangeGross = rangeTxs.reduce((s, t) => s + (t.totalCharge || 0), 0);
   const rangeUnits = rangeTxs.reduce((s, t) => s + (t.totalUnits || 0), 0);
   const rangePatients = new Set(rangeTxs.map(t => t.clientId)).size;
@@ -2637,8 +2646,12 @@ function viewEndOfDay() {
       </div>
 
       <div class="screen-body px-6">
-        <div class="mb-4">
+        <div class="flex items-center justify-between mb-4" style="gap:12px;">
           <div class="date">${formatDate(today, 'full')}</div>
+          <select id="eod-clinic" class="input" style="width:auto;min-width:140px;padding:8px 12px;font-size:14px;">
+            <option value=""${!clinicFilter ? ' selected' : ''}>All clinics</option>
+            ${CLINIC_LOCATIONS.map(loc => `<option value="${loc}"${clinicFilter === loc ? ' selected' : ''}>${loc}</option>`).join('')}
+          </select>
         </div>
 
 
@@ -3164,6 +3177,12 @@ function setupEndOfDay() {
     });
   });
 
+  const clinicSelect = document.getElementById('eod-clinic');
+  if (clinicSelect) clinicSelect.addEventListener('change', () => {
+    state.eodClinic = clinicSelect.value;
+    render();
+  });
+
   const startInput = document.getElementById('eod-start');
   const endInput = document.getElementById('eod-end');
   if (startInput) startInput.addEventListener('change', () => {
@@ -3192,8 +3211,10 @@ function setupEndOfDay() {
 // with their units, visit count, charge and profit — plus a totals footer. Profit is
 // summed per-client via lineCostProfit (linear), so it matches the Summary table.
 function openProductBreakdown(product, startISO, endISO) {
+  const clinicFilter = state.eodClinic || '';
   const txs = state.data.treatments.filter(t =>
-    t.product === product && t.date >= startISO && t.date <= endISO);
+    t.product === product && t.date >= startISO && t.date <= endISO &&
+    (!clinicFilter || txClinic(t) === clinicFilter));
 
   const byClient = {};
   txs.forEach(t => {
