@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-16 · update-check';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-16 · update-banner-bottom';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -5229,9 +5229,9 @@ function showUpdateBanner() {
   const bar = document.createElement('button');
   bar.id = 'update-banner';
   bar.textContent = 'Update available — tap to reload';
-  bar.setAttribute('style', 'position:fixed;top:0;left:0;right:0;z-index:9999;width:100%;border:none;' +
-    'padding:14px;background:#92400e;color:#fffbeb;font-size:15px;font-weight:600;letter-spacing:.02em;' +
-    'box-shadow:0 2px 12px rgba(0,0,0,.18);cursor:pointer;');
+  bar.setAttribute('style', 'position:fixed;bottom:0;left:0;right:0;z-index:9999;width:100%;border:none;' +
+    'padding:14px;padding-bottom:calc(14px + env(safe-area-inset-bottom));background:#92400e;color:#fffbeb;' +
+    'font-size:15px;font-weight:600;letter-spacing:.02em;box-shadow:0 -2px 12px rgba(0,0,0,.18);cursor:pointer;');
   // Reload via a fresh URL (new query → not the cached copy). Same origin, so all
   // localStorage/IndexedDB data is preserved.
   bar.addEventListener('click', () => { location.href = location.pathname + '?v=' + Date.now(); });
