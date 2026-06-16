@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-16 · clinic-summary-filter';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-16 · update-check';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -5209,6 +5209,36 @@ function setupLanree() {
 }
 
 // ================================================================
+//   UPDATE CHECK
+// ================================================================
+// The app is one HTML file on GitHub Pages (HTTP-cached up to 10 min; the iOS
+// home-screen app also holds it in memory between launches), so a new build can
+// lag behind. This re-fetches the live file (cache-busted), reads its APP_BUILD,
+// and — if it differs from the running build — shows a tap-to-reload banner.
+async function checkForUpdate() {
+  try {
+    const res = await fetch(location.pathname + '?_=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) return;
+    const m = (await res.text()).match(/APP_BUILD\s*=\s*'([^']+)'/);
+    if (m && m[1] && m[1] !== APP_BUILD) showUpdateBanner();
+  } catch (e) { /* offline / fetch blocked (e.g. file://) — ignore */ }
+}
+
+function showUpdateBanner() {
+  if (document.getElementById('update-banner')) return;   // already shown
+  const bar = document.createElement('button');
+  bar.id = 'update-banner';
+  bar.textContent = 'Update available — tap to reload';
+  bar.setAttribute('style', 'position:fixed;top:0;left:0;right:0;z-index:9999;width:100%;border:none;' +
+    'padding:14px;background:#92400e;color:#fffbeb;font-size:15px;font-weight:600;letter-spacing:.02em;' +
+    'box-shadow:0 2px 12px rgba(0,0,0,.18);cursor:pointer;');
+  // Reload via a fresh URL (new query → not the cached copy). Same origin, so all
+  // localStorage/IndexedDB data is preserved.
+  bar.addEventListener('click', () => { location.href = location.pathname + '?v=' + Date.now(); });
+  document.body.appendChild(bar);
+}
+
+// ================================================================
 //   BOOTSTRAP
 // ================================================================
 document.addEventListener('DOMContentLoaded', () => {
@@ -5232,6 +5262,11 @@ document.addEventListener('DOMContentLoaded', () => {
     render();
   }
   lanreeBootAuth();   // complete any pending Microsoft sign-in redirect
+
+  checkForUpdate();   // detect a newer published build now…
+  // …and again whenever the app is brought back to the foreground (the common
+  // case for the home-screen PWA, which holds an old build in memory).
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
 });
 </script>
 </body>
