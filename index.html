@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-16 · clinic-commission';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-18 · lanree-update-in-place';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -4983,15 +4983,25 @@ function lanreeTimeDecimal(timeStr) {
 // From the day-tab's A:D values (rows of [time, name, notes, treatment]) pick the
 // sheet row to write: the matching empty time slot, else the first empty slot.
 // firstDataRow = the sheet row number of values[0]. Returns null if the day is full.
-function findLanreeRow(values, slotDecimal, firstDataRow) {
-  const isEmpty = (r) => !String(r && r[1] != null ? r[1] : '').trim();   // col B (name) blank
+function findLanreeRow(values, slotDecimal, firstDataRow, fullName) {
+  const nameOf = (r) => String(r && r[1] != null ? r[1] : '').trim();   // col B (name)
+  const isEmpty = (r) => !nameOf(r);
+  // 1. Update-in-place: a row already holding this client → reuse it (don't add a duplicate).
+  const target = String(fullName || '').trim().toLowerCase();
+  if (target) {
+    for (let i = 0; i < values.length; i++) {
+      if (nameOf(values[i]).toLowerCase() === target) return { row: firstDataRow + i, existed: true };
+    }
+  }
+  // 2. Match the client's booked time slot, if that slot is still open.
   if (!isNaN(slotDecimal)) {
     for (let i = 0; i < values.length; i++) {
       const t = parseFloat(values[i] && values[i][0]);
-      if (!isNaN(t) && Math.abs(t - slotDecimal) < 0.005 && isEmpty(values[i])) return firstDataRow + i;
+      if (!isNaN(t) && Math.abs(t - slotDecimal) < 0.005 && isEmpty(values[i])) return { row: firstDataRow + i, existed: false };
     }
   }
-  for (let i = 0; i < values.length; i++) if (isEmpty(values[i])) return firstDataRow + i;
+  // 3. First open row.
+  for (let i = 0; i < values.length; i++) if (isEmpty(values[i])) return { row: firstDataRow + i, existed: false };
   return null;
 }
 
@@ -5166,8 +5176,9 @@ async function pushTreatmentToLanree(record) {
     (a.name || '').trim().toLowerCase() === fullName.toLowerCase());
   if (appt) slot = lanreeTimeDecimal(appt.time);
 
-  const row = findLanreeRow(values, slot, FIRST);
-  if (!row) throw new Error(`No open slot left on “${sheetName}”.`);
+  const hit = findLanreeRow(values, slot, FIRST, fullName);
+  if (!hit) throw new Error(`No open slot left on “${sheetName}”.`);
+  const { row, existed } = hit;
 
   const { units, charge } = lanreeRowValues(record);
   // Write Name(B), Treatment(D), Units(E), Charge/unit(G). Cost/unit(F) and the
@@ -5179,7 +5190,8 @@ async function pushTreatmentToLanree(record) {
   await put('E', units);
   await put('G', charge);
 
-  return { ok: true, message: `Added ${fullName || 'client'} to “${sheetName}”, row ${row}.`, sheetName, row };
+  const verb = existed ? 'Updated' : 'Added';
+  return { ok: true, message: `${verb} ${fullName || 'client'} on “${sheetName}”, row ${row}.`, sheetName, row, existed };
 }
 
 // ---- Settings wiring ----
