@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-18 · lanree-update-in-place';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-18 · lanree-tab-match';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -5146,6 +5146,27 @@ async function lanreeResolveFile() {
 
 const lanreeWsPath = (itemId, name) => `/me/drive/items/${itemId}/workbook/worksheets('${encodeURIComponent(name)}')`;
 
+// Match a tab name loosely: ignore case and any whitespace differences
+// (trailing/double/non-breaking spaces are invisible in Excel but break the
+// exact-name Graph lookup). \s covers   etc.
+const lanreeNormTab = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+// Find the real worksheet whose name matches `want` (e.g. "19 Jun 26"), tolerating
+// invisible whitespace. Returns the ACTUAL tab name to use in later calls, or
+// throws a 404-style error listing the day-tabs that do exist.
+async function lanreeResolveSheet(itemId, want, token) {
+  const list = await graph(`/me/drive/items/${itemId}/workbook/worksheets?$select=name`, token);
+  const sheets = (list.value || []).map(w => w.name);
+  const target = lanreeNormTab(want);
+  const hit = sheets.find(n => lanreeNormTab(n) === target);
+  if (hit) return hit;
+  const days = sheets.filter(n => /^\s*\d{1,2}\s+\w+\s+\d{2}\s*$/.test(n));
+  const err = new Error(`Tab “${want}” doesn’t exist yet — create it from the Template in Excel, then try again.` +
+    (days.length ? ` (Day tabs found: ${days.join(', ')}.)` : ''));
+  err.status = 404;
+  throw err;
+}
+
 // Push one treatment record into its day-tab. Returns {ok, message} or throws.
 async function pushTreatmentToLanree(record) {
   if (!lanreeCfg().clientId) throw new Error('Set up Lanree sync in Settings first.');
@@ -5156,16 +5177,13 @@ async function pushTreatmentToLanree(record) {
   const sheetName = formatLanreeTab(record.date);
   if (!sheetName) throw new Error('This treatment has no valid date.');
 
-  // The day-tab must already exist (you copy the Template each morning).
-  try { await graph(lanreeWsPath(itemId, sheetName), token); }
-  catch (e) {
-    if (e.status === 404) throw new Error(`Tab “${sheetName}” doesn’t exist yet — create it from the Template in Excel, then try again.`);
-    throw e;
-  }
+  // The day-tab must already exist (you copy the Template each morning). Resolve the
+  // real tab name (tolerating invisible whitespace) and use it for every later call.
+  const wsName = await lanreeResolveSheet(itemId, sheetName, token);
 
   // Read the slot grid (rows 4–30: time + name + notes + treatment) to pick a row.
   const FIRST = 4, LAST = 30;
-  const range = await graph(`${lanreeWsPath(itemId, sheetName)}/range(address='${encodeURIComponent('A' + FIRST + ':D' + LAST)}')`, token);
+  const range = await graph(`${lanreeWsPath(itemId, wsName)}/range(address='${encodeURIComponent('A' + FIRST + ':D' + LAST)}')`, token);
   const values = range.values || [];
 
   const client = getClient(record.clientId);
@@ -5183,7 +5201,7 @@ async function pushTreatmentToLanree(record) {
   const { units, charge } = lanreeRowValues(record);
   // Write Name(B), Treatment(D), Units(E), Charge/unit(G). Cost/unit(F) and the
   // computed columns (H–L) are left to the sheet's own formulas.
-  const put = (col, val) => graph(`${lanreeWsPath(itemId, sheetName)}/range(address='${col}${row}')`, token,
+  const put = (col, val) => graph(`${lanreeWsPath(itemId, wsName)}/range(address='${col}${row}')`, token,
     { method: 'PATCH', body: JSON.stringify({ values: [[val]] }) });
   await put('B', fullName);
   await put('D', lanreeProductName(record.product));
