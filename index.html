@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-18 · lanree-tab-match';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-06-19 · lanree-review-date';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -4232,8 +4232,20 @@ function setupTreatment() {
     try {
       const record = commitTreatmentDraft(window._txDraft || t);
       if (window._txDraft) window._txDraft.id = record.id;   // a later Save updates, not duplicates
-      const res = await pushTreatmentToLanree(record);
-      show(res.message, true);
+      // Push the treatment to its own day-tab, then any linked 2-week review to the
+      // REVIEW's date tab — NOT the treatment date (the review is a separate visit, a
+      // $0-charge line). Each push is independent so a missing/old treatment tab can't
+      // block the review send. The review record already carries its own review date.
+      const msgs = [];
+      let anyOk = false;
+      try { const r = await pushTreatmentToLanree(record); msgs.push(r.message); anyOk = true; }
+      catch (e) { msgs.push('Treatment: ' + (e.message || 'failed')); }
+      const reviewRec = state.data.treatments.find(x => x.reviewOf === record.id);
+      if (reviewRec && reviewRec.product) {
+        try { const r = await pushTreatmentToLanree(reviewRec); msgs.push('Review → ' + r.message); anyOk = true; }
+        catch (e) { msgs.push('Review: ' + (e.message || 'failed')); }
+      }
+      show(msgs.join('  ·  '), anyOk);
     } catch (e) {
       show(e.message || 'Could not send to Lanree.', false);
     } finally {
