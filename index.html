@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-06-24 · review-photos-2';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-08-26 · backup-streaming';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -1030,27 +1030,70 @@ async function countPhotos() {
   } catch { return 0; }
 }
 
-// Read every stored photo as an { id: dataUrl } map in ONE transaction — fast
-// enough that the export's native share sheet still fires inside iOS's
-// user-activation window. Used to bundle photos into a backup.
-async function getAllPhotos() {
+// Photo ids only — cheap, no image bytes. Used to drive the streaming backup.
+async function getAllPhotoKeys() {
   const db = await openPhotoDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(PHOTO_STORE, 'readonly');
-    const store = tx.objectStore(PHOTO_STORE);
-    const keysReq = store.getAllKeys();
-    const valsReq = store.getAll();
-    let keys = null, vals = null;
-    const tryFinish = () => {
-      if (keys === null || vals === null) return;
-      const out = {};
-      for (let i = 0; i < keys.length; i++) out[String(keys[i])] = vals[i];
-      resolve(out);
-    };
-    keysReq.onsuccess = () => { keys = keysReq.result; tryFinish(); };
-    valsReq.onsuccess = () => { vals = valsReq.result; tryFinish(); };
-    tx.onerror = () => reject(tx.error);
+    const req = tx.objectStore(PHOTO_STORE).getAllKeys();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
   });
+}
+
+// Build the full backup WITHOUT ever holding it in the JS heap.
+//
+// The previous version read every photo into one { id: dataUrl } object, then
+// JSON.stringify'd it, then copied that string into a File. With a real photo
+// library that is ~165 MB of data-URL strings + a ~165 MB JSON string + a
+// ~165 MB File copy alive at the same moment. iPad Safari kills the tab long
+// before that and shows "A problem occurred with this webpage".
+//
+// Here photos are read one at a time and flushed into intermediate Blobs every
+// FLUSH_BYTES. Blobs are backed by the browser's blob store (spilled to disk),
+// not the JS heap, so peak memory stays a few MB no matter how many photos are
+// stored. The bytes produced are the same drwessels-backup-v2 JSON the import
+// handler already understands — old backups still restore, new ones are no
+// different to read. See [[ios-backup-oom]].
+const BACKUP_FLUSH_BYTES = 4 * 1024 * 1024;
+
+async function buildFullBackupFile(onProgress) {
+  const blobs = [];
+  let parts = [], pending = 0;
+  const flush = () => {
+    if (!parts.length) return;
+    blobs.push(new Blob(parts, { type: 'application/json' }));
+    parts = []; pending = 0;
+  };
+  const push = (s) => {
+    parts.push(s); pending += s.length;
+    if (pending >= BACKUP_FLUSH_BYTES) flush();
+  };
+
+  // Records first. state.data carries only small photo-id strings, so this is
+  // a few MB at most. Drop any stray `photos` key so it can't be written twice.
+  const { photos: _ignored, ...records } = state.data;
+  const head = JSON.stringify({ ...records, _format: 'drwessels-backup-v2' });
+  push(head.slice(0, -1));      // strip the closing brace; photos are appended
+  push(',"photos":{');
+
+  const ids = await getAllPhotoKeys();
+  let first = true;
+  for (let i = 0; i < ids.length; i++) {
+    const dataUrl = await getPhoto(ids[i]);
+    if (!dataUrl) continue;     // id present but image gone — skip, don't abort
+    push((first ? '' : ',') + JSON.stringify(String(ids[i])) + ':' + JSON.stringify(dataUrl));
+    first = false;
+    if (i % 25 === 0) {
+      onProgress && onProgress(i + 1, ids.length);
+      // Yield so the UI can paint and the last photo's string can be reclaimed.
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+  push('}}');
+  flush();
+
+  return new File(blobs, `drwessels-backup-${todayISO()}.json`, { type: 'application/json' });
 }
 
 // Compress photo to ~1200px on longest edge, JPEG 85% quality
@@ -4648,9 +4691,9 @@ function setupSettings() {
     show('Preparing backup (including photos)…');
     let file;
     try {
-      const photos = await getAllPhotos();
-      const json = JSON.stringify({ ...state.data, photos, _format: 'drwessels-backup-v2' });
-      file = new File([json], `drwessels-backup-${todayISO()}.json`, { type: 'application/json' });
+      file = await buildFullBackupFile((done, total) => {
+        show(`Preparing backup… ${done} of ${total} photos`);
+      });
     } catch (e) {
       show('Could not prepare backup: ' + (e.message || e), true);
       return;
