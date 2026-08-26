@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-08-26 · backup-streaming';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-08-26 · backup-restore-streaming';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -1094,6 +1094,147 @@ async function buildFullBackupFile(onProgress) {
   flush();
 
   return new File(blobs, `drwessels-backup-${todayISO()}.json`, { type: 'application/json' });
+}
+
+// ---- Restore -------------------------------------------------------------
+// Reading a backup has the mirror-image problem of writing one: the old import
+// did FileReader.readAsText() then JSON.parse(), which needs the whole file as
+// a single JavaScript string. JS engines cap string length (V8 at 512 MB), so a
+// 639 MB backup fails outright on Chrome/Edge with "Invalid string length" and
+// OOM-kills the tab on iPad. See [[ios-backup-oom]].
+//
+// Instead we walk the file in slices and parse it incrementally, so restoring a
+// 639 MB backup uses the same memory as a small one. The format is unchanged,
+// so this reads every backup ever exported, photos-last or not.
+const RESTORE_CHUNK_BYTES = 4 * 1024 * 1024;
+const RESTORE_BATCH = 20;          // photos written per IndexedDB transaction
+const RESTORE_HEAD_MAX = 64 * 1024 * 1024;   // records section sanity cap
+
+function readBlobArrayBuffer(blob) {
+  if (blob.arrayBuffer) return blob.arrayBuffer();
+  return new Promise((resolve, reject) => {      // older iOS Safari
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsArrayBuffer(blob);
+  });
+}
+
+// Decode the file as UTF-8 text in chunks. TextDecoder({stream:true}) carries
+// partial multi-byte characters across slice boundaries, so cutting the file at
+// arbitrary byte offsets is safe.
+async function* backupTextChunks(file) {
+  const dec = new TextDecoder('utf-8');
+  for (let off = 0; off < file.size; off += RESTORE_CHUNK_BYTES) {
+    const end = Math.min(off + RESTORE_CHUNK_BYTES, file.size);
+    yield dec.decode(await readBlobArrayBuffer(file.slice(off, end)), { stream: true });
+  }
+  const tail = dec.decode();
+  if (tail) yield tail;
+}
+
+async function savePhotosBatch(entries) {
+  if (!entries.length) return;
+  const db = await openPhotoDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PHOTO_STORE, 'readwrite');
+    const store = tx.objectStore(PHOTO_STORE);
+    for (const [id, dataUrl] of entries) {
+      try { store.put(dataUrl, id); } catch (_) { /* skip one bad image, keep the rest */ }
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// Walk a backup file. Everything before the top-level "photos" object is the
+// records section — small, so it is parsed whole. Each photo after it is handed
+// to onPhotoBatch and then dropped. Pass stopAfterRecords to read just the
+// header (a few MB) for the confirm prompt without touching the photo payload.
+async function streamBackupFile(file, opts = {}) {
+  const { onPhotoBatch, onProgress, stopAfterRecords } = opts;
+  let mode = 'head', head = '', records = null, count = 0;
+  let depth = 0, inString = false, escaped = false, expectKey = false;
+  const stack = [];
+  let capturing = false, capBuf = '', lastKey = null, photosPending = false;
+  let inTok = false, tok = '', tokEsc = false, pState = 'key', curId = null;
+  let batch = [];
+
+  const flush = async () => {
+    if (!batch.length) return;
+    if (onPhotoBatch) await onPhotoBatch(batch);
+    count += batch.length; batch = [];
+    onProgress && onProgress(count);
+  };
+  const cutRecords = () => {
+    const text = head.slice(0, -1).replace(/,\s*"photos"\s*:\s*$/, '') + '}';
+    try { records = JSON.parse(text); }
+    catch (e) { throw new Error('the records section is unreadable (' + e.message + ')'); }
+    head = '';
+  };
+
+  for await (const text of backupTextChunks(file)) {
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+
+      if (mode === 'head') {
+        head += ch;
+        if (head.length > RESTORE_HEAD_MAX) throw new Error('this does not look like a backup file');
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (ch === '\\') escaped = true;
+          else if (ch === '"') { inString = false; if (capturing) { lastKey = capBuf; capturing = false; capBuf = ''; } }
+          else if (capturing) capBuf += ch;
+          continue;
+        }
+        if (ch === '"') { inString = true; if (stack[stack.length - 1] === 'obj' && expectKey) { capturing = true; capBuf = ''; } continue; }
+        if (ch === ':') { expectKey = false; if (depth === 1 && lastKey === 'photos') photosPending = true; continue; }
+        if (ch === '{' || ch === '[') {
+          if (ch === '{' && photosPending) {   // top-level photos — records end here
+            cutRecords();
+            if (stopAfterRecords) return { records, photos: 0 };
+            mode = 'photos'; pState = 'key';
+            continue;
+          }
+          stack.push(ch === '{' ? 'obj' : 'arr'); depth++; expectKey = (ch === '{'); continue;
+        }
+        if (ch === '}' || ch === ']') { stack.pop(); depth--; expectKey = false; continue; }
+        if (ch === ',') { expectKey = (stack[stack.length - 1] === 'obj'); continue; }
+        continue;
+      }
+
+      if (mode === 'photos') {
+        if (inTok) {
+          if (tokEsc) { tok += ch; tokEsc = false; }
+          else if (ch === '\\') { tok += ch; tokEsc = true; }
+          else if (ch === '"') {
+            tok += ch; inTok = false;
+            const val = JSON.parse(tok); tok = '';
+            if (pState === 'key') { curId = val; pState = 'colon'; }
+            else {
+              batch.push([curId, val]); curId = null; pState = 'sep';
+              if (batch.length >= RESTORE_BATCH) await flush();
+            }
+          } else tok += ch;
+          continue;
+        }
+        if (ch === '"') { inTok = true; tok = '"'; continue; }
+        if (ch === ':') { pState = 'value'; continue; }
+        if (ch === ',') { pState = 'key'; continue; }
+        if (ch === '}') { await flush(); mode = 'done'; continue; }
+        continue;   // whitespace
+      }
+      // mode === 'done' — trailing keys after the photos object are ignored
+    }
+  }
+
+  await flush();
+  // A records-only backup has no photos object at all: the whole file is header.
+  if (mode === 'head' && head) {
+    try { records = JSON.parse(head); }
+    catch (e) { throw new Error('this does not look like a backup file'); }
+  }
+  return { records, photos: count };
 }
 
 // Compress photo to ~1200px on longest edge, JPEG 85% quality
@@ -4873,32 +5014,29 @@ function setupSettings() {
     s.textContent = msg;
   };
 
-  document.getElementById('import-file')?.addEventListener('change', (e) => {
+  // Reads ONLY the records section (a few MB) so the confirm prompt appears
+  // immediately even on a 639 MB backup. The photos are streamed later, once
+  // the user actually taps "Replace all data".
+  document.getElementById('import-file')?.addEventListener('change', async (e) => {
     const f = e.target.files[0];
     e.target.value = '';
     if (!f) return;
     importSetStatus('Reading ' + f.name + '…');
-    const reader = new FileReader();
-    reader.onerror = () => importSetStatus('Could not read that file. Please try again.', true);
-    reader.onload = (ev) => {
-      let imported;
-      try {
-        imported = JSON.parse(ev.target.result);
-        if (!imported.clients || !imported.treatments) throw new Error('Not a valid backup file');
-      } catch (err) {
-        importSetStatus('Could not import file: ' + (err.message || err), true);
-        return;
-      }
-      _pendingImport = imported;
-      const photoCount = (imported.photos && typeof imported.photos === 'object') ? Object.keys(imported.photos).length : 0;
-      const msgEl = document.getElementById('import-confirm-msg');
-      if (msgEl) msgEl.textContent =
-        `Import ${imported.clients.length} client${imported.clients.length===1?'':'s'}, ${imported.treatments.length} treatment${imported.treatments.length===1?'':'s'}${photoCount ? ` and ${photoCount} photo${photoCount===1?'':'s'}` : ''}? This REPLACES all data currently on this device.`;
-      importSetStatus('');  // hide the "Reading…" line; the confirm panel now shows
-      const panel = document.getElementById('import-confirm');
-      if (panel) panel.style.display = 'block';
-    };
-    reader.readAsText(f);
+    let records;
+    try {
+      ({ records } = await streamBackupFile(f, { stopAfterRecords: true }));
+      if (!records || !records.clients || !records.treatments) throw new Error('Not a valid backup file');
+    } catch (err) {
+      importSetStatus('Could not import file: ' + (err.message || err), true);
+      return;
+    }
+    _pendingImport = { records, file: f };
+    const msgEl = document.getElementById('import-confirm-msg');
+    if (msgEl) msgEl.textContent =
+      `Import ${records.clients.length} client${records.clients.length===1?'':'s'}, ${records.treatments.length} treatment${records.treatments.length===1?'':'s'} and every photo in this file? This REPLACES all data currently on this device.`;
+    importSetStatus('');  // hide the "Reading…" line; the confirm panel now shows
+    const panel = document.getElementById('import-confirm');
+    if (panel) panel.style.display = 'block';
   });
 
   document.getElementById('import-cancel')?.addEventListener('click', () => {
@@ -4909,23 +5047,22 @@ function setupSettings() {
   });
 
   document.getElementById('import-confirm-go')?.addEventListener('click', async () => {
-    const imported = _pendingImport;
-    if (!imported) return;
+    const pending = _pendingImport;
+    if (!pending) return;
     _pendingImport = null;
     const panel = document.getElementById('import-confirm');
     if (panel) panel.style.display = 'none';
     importSetStatus('Importing…');
     try {
       // Restore the bundled photos into IndexedDB first so they resolve once the
-      // UI re-renders. A bad image is skipped rather than aborting.
-      const photos = (imported.photos && typeof imported.photos === 'object') ? imported.photos : null;
-      let restored = 0;
-      if (photos) {
-        for (const id in photos) {
-          try { await savePhoto(id, photos[id]); restored++; } catch (err) { /* skip */ }
-        }
-      }
-      const { photos: _omitPhotos, _format, ...data } = imported;
+      // UI re-renders. Streamed a batch at a time straight from the file, so the
+      // photo payload is never held in memory. A bad image is skipped rather
+      // than aborting.
+      const { photos: restored } = await streamBackupFile(pending.file, {
+        onPhotoBatch: savePhotosBatch,
+        onProgress: (n) => importSetStatus(`Restoring photos… ${n}`)
+      });
+      const { photos: _omitPhotos, _format, ...data } = pending.records;
       state.data = migrateClientClinic(migrateClinicRates(migrateAllTreatments({ ...structuredClone(DEFAULT_DATA), ...data })));
       saveData();
       markBackupNow();   // the file just imported is itself an off-device copy
