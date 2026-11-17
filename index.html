@@ -397,7 +397,7 @@ canvas { touch-action: none; display: block; width: 100%; height: 100%; }
 //   DATA LAYER — localStorage persistence
 // ================================================================
 const STORAGE_KEY = 'drwessels_aesthetics_v1';
-const APP_BUILD = '2026-08-26 · backup-restore-streaming';   // bump on each change; shown in Settings to confirm the loaded version
+const APP_BUILD = '2026-11-17 · face-outline-camera + appt-opens-summary';   // bump on each change; shown in Settings to confirm the loaded version
 
 // Clinic locations a client can be assigned to (shown as a dropdown on the client screen).
 const CLINIC_LOCATIONS = ['Lanree', 'Coromandel', 'Phuri'];
@@ -1294,6 +1294,221 @@ function compressPhoto(file) {
 }
 
 // ================================================================
+//   GUIDED CAMERA (face-outline overlay)
+// ================================================================
+// The native camera (file input, capture=environment) can't draw anything over
+// its viewfinder, so client photos came out at whatever distance and framing the
+// iPad happened to be held. This is an in-app camera: a live preview inside a
+// fixed 3:4 portrait frame with a face outline drawn on top. Line the face up
+// with the outline and every photo has the same framing, and every capture is
+// saved at exactly CAM_OUT_W x CAM_OUT_H pixels.
+//
+// The capture is handed back as a JPEG File so it goes through the same
+// handlePhotoFile -> compressPhoto -> IndexedDB path as a native camera photo.
+// If the live camera can't start (permission refused, old browser), the screen
+// offers a "Use standard camera" button; tapping it is a fresh gesture, so iOS
+// still opens the native camera (see [[ios-no-dialog-after-await]]).
+const CAM_OUT_W = 900, CAM_OUT_H = 1200;
+const CAM_GUIDE_KEY = 'camGuideOn';
+let _camStream = null;
+
+function stopGuidedCamera() {
+  if (_camStream) { try { _camStream.getTracks().forEach(t => t.stop()); } catch (_) {} _camStream = null; }
+  document.getElementById('cam-modal')?.remove();
+}
+
+// Face outline in a 300x400 box (same 3:4 shape as the frame and the saved
+// photo). Drawn twice — dark underlay, light line on top — so it shows against
+// both light and dark backgrounds.
+function faceGuideSVG() {
+  const shapes = `
+    <path d="M150 47 C 221 47 260 110 260 181 C 260 259 217 337 150 337 C 83 337 40 259 40 181 C 40 110 79 47 150 47 Z"/>
+    <line x1="22" y1="175" x2="278" y2="175" stroke-dasharray="7 7"/>
+    <line x1="150" y1="22" x2="150" y2="363" stroke-dasharray="7 7"/>
+    <line x1="128" y1="337" x2="172" y2="337"/>
+    <line x1="128" y1="47" x2="172" y2="47"/>`;
+  return `
+    <svg id="cam-guide" viewBox="0 0 300 400" preserveAspectRatio="none" aria-hidden="true">
+      <g fill="none" stroke="rgba(0,0,0,.55)" stroke-width="4" stroke-linecap="round">${shapes}</g>
+      <g fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round">${shapes}</g>
+    </svg>`;
+}
+
+// opts: { title, onCapture(file), onFallback() }
+function openGuidedCamera(opts = {}) {
+  stopGuidedCamera();
+  let guideOn = true;
+  try { guideOn = localStorage.getItem(CAM_GUIDE_KEY) !== 'off'; } catch (_) {}
+  let facing = 'environment';
+  let shot = null;            // { blob, url } while reviewing a capture
+
+  const modal = document.createElement('div');
+  modal.id = 'cam-modal';
+  modal.innerHTML = `
+    <style>
+      #cam-modal { position:fixed; inset:0; z-index:1100; background:#000; color:#fafaf9; display:flex; flex-direction:column; align-items:center;
+        padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); -webkit-user-select:none; user-select:none; touch-action:manipulation; }
+      #cam-top { width:100%; display:flex; align-items:center; justify-content:space-between; padding:10px 16px; box-sizing:border-box; min-height:48px; }
+      #cam-title { font-size:15px; font-weight:700; letter-spacing:.04em; }
+      #cam-hint { font-size:13px; color:#d6d3d1; text-align:center; padding:0 16px 8px; min-height:18px; }
+      #cam-stage { flex:1; min-height:0; width:100%; display:flex; align-items:center; justify-content:center; }
+      #cam-frame { position:relative; width:300px; height:400px; flex-shrink:0; overflow:hidden; background:#1c1917; border-radius:10px; }
+      #cam-video, #cam-still { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block; }
+      #cam-video.mirror { transform:scaleX(-1); }
+      #cam-guide { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+      #cam-msg { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px; text-align:center; font-size:15px; line-height:1.5; background:#1c1917; }
+      #cam-bar { width:100%; display:grid; grid-template-columns:1fr auto 1fr; align-items:center; padding:14px 20px 16px; box-sizing:border-box; }
+      .cam-txt { background:none; border:0; color:#fafaf9; font-size:16px; font-weight:600; padding:12px 8px; }
+      .cam-txt[disabled] { opacity:.35; }
+      .cam-pill { background:rgba(255,255,255,.14); border:0; color:#fafaf9; font-size:13px; font-weight:600; padding:8px 14px; border-radius:999px; }
+      .cam-pill.on { background:#fafaf9; color:#1c1917; }
+      #cam-shutter { width:74px; height:74px; border-radius:50%; background:#fafaf9; border:5px solid #000; box-shadow:0 0 0 4px #fafaf9; }
+      #cam-shutter:active { background:#d6d3d1; }
+      #cam-shutter[disabled] { opacity:.35; }
+      #cam-use { background:#92400e; color:#fafaf9; border:0; border-radius:999px; font-size:16px; font-weight:700; padding:14px 22px; }
+    </style>
+    <div id="cam-top">
+      <button class="cam-pill ${guideOn ? 'on' : ''}" id="cam-guide-toggle">Outline ${guideOn ? 'on' : 'off'}</button>
+      <div id="cam-title">${escapeHtml(opts.title || 'Photo')}</div>
+      <button class="cam-pill" id="cam-flip">Flip camera</button>
+    </div>
+    <div id="cam-hint">Fit the face inside the outline, eyes on the dashed line</div>
+    <div id="cam-stage">
+      <div id="cam-frame">
+        <video id="cam-video" autoplay playsinline muted></video>
+        <img id="cam-still" alt="" style="display:none;">
+        ${faceGuideSVG()}
+        <div id="cam-msg">Starting camera…</div>
+      </div>
+    </div>
+    <div id="cam-bar">
+      <div style="justify-self:start;"><button class="cam-txt" id="cam-left">Cancel</button></div>
+      <div id="cam-mid"><button id="cam-shutter" aria-label="Take photo" disabled></button></div>
+      <div style="justify-self:end;"></div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  const $ = (id) => modal.querySelector('#' + id);
+  const video = $('cam-video'), still = $('cam-still'), msg = $('cam-msg'), guide = $('cam-guide');
+  guide.style.display = guideOn ? '' : 'none';
+
+  // Size the frame to the largest 3:4 box that fits the space between the top
+  // and bottom bars, in any orientation or screen size.
+  const stage = $('cam-stage'), frame = $('cam-frame');
+  function fitFrame() {
+    const r = stage.getBoundingClientRect();
+    const w = Math.max(120, Math.floor(Math.min(r.width, r.height * CAM_OUT_W / CAM_OUT_H)));
+    frame.style.width = w + 'px';
+    frame.style.height = Math.round(w * CAM_OUT_H / CAM_OUT_W) + 'px';
+  }
+  fitFrame();
+  window.addEventListener('resize', fitFrame);
+
+  const onHide = () => { if (document.hidden) close(); };   // never leave the camera running in the background
+  function close() {
+    document.removeEventListener('visibilitychange', onHide);
+    window.removeEventListener('resize', fitFrame);
+    if (shot) { URL.revokeObjectURL(shot.url); shot = null; }
+    stopGuidedCamera();
+  }
+  document.addEventListener('visibilitychange', onHide);
+
+  function showFailure(text) {
+    msg.style.display = 'flex';
+    msg.innerHTML = `<div>${text}</div>
+      <button id="cam-fallback" style="background:#fafaf9;color:#1c1917;border:0;border-radius:999px;font-size:15px;font-weight:700;padding:12px 20px;">Use standard camera</button>`;
+    $('cam-shutter') && ($('cam-shutter').disabled = true);
+    $('cam-fallback').addEventListener('click', () => { close(); opts.onFallback && opts.onFallback(); });
+  }
+
+  async function start() {
+    if (_camStream) { _camStream.getTracks().forEach(t => t.stop()); _camStream = null; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showFailure('The outline camera is not available in this browser.');
+      return;
+    }
+    msg.style.display = 'flex'; msg.textContent = 'Starting camera…';
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1440 } }
+      });
+      if (!document.getElementById('cam-modal')) { stream.getTracks().forEach(t => t.stop()); return; }  // closed while starting
+      _camStream = stream;
+      video.srcObject = stream;
+      video.classList.toggle('mirror', facing === 'user');
+      await video.play().catch(() => {});
+      msg.style.display = 'none';
+      const sh = $('cam-shutter'); if (sh) sh.disabled = false;
+    } catch (e) {
+      const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+      showFailure(denied
+        ? 'Camera access was refused. Allow the camera for this app in Settings, or use the standard camera for now.'
+        : 'Could not start the camera' + (e && e.message ? ' (' + escapeHtml(e.message) + ')' : '') + '.');
+    }
+  }
+
+  // Centre-crop the live frame to 3:4 — the same crop object-fit:cover shows on
+  // screen, so the saved photo matches the outline exactly.
+  function capture() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return;
+    const target = CAM_OUT_W / CAM_OUT_H;
+    let sw = vw, sh = vh, sx = 0, sy = 0;
+    if (vw / vh > target) { sw = Math.round(vh * target); sx = Math.round((vw - sw) / 2); }
+    else { sh = Math.round(vw / target); sy = Math.round((vh - sh) / 2); }
+    const canvas = document.createElement('canvas');
+    canvas.width = CAM_OUT_W; canvas.height = CAM_OUT_H;
+    canvas.getContext('2d').drawImage(video, sx, sy, sw, sh, 0, 0, CAM_OUT_W, CAM_OUT_H);
+    canvas.toBlob((blob) => {
+      if (!blob) { showFailure('Could not capture the photo.'); return; }
+      shot = { blob, url: URL.createObjectURL(blob) };
+      still.src = shot.url; still.style.display = 'block';
+      video.pause();
+      setReview(true);
+    }, 'image/jpeg', 0.95);
+  }
+
+  function setReview(on) {
+    $('cam-hint').textContent = on ? 'Check the face sits in the outline' : 'Fit the face inside the outline, eyes on the dashed line';
+    $('cam-flip').style.visibility = on ? 'hidden' : '';
+    $('cam-left').textContent = on ? 'Retake' : 'Cancel';
+    $('cam-mid').innerHTML = on
+      ? '<button id="cam-use">Use photo</button>'
+      : '<button id="cam-shutter" aria-label="Take photo"></button>';
+    if (on) $('cam-use').addEventListener('click', usePhoto);
+    else $('cam-shutter').addEventListener('click', capture);
+  }
+
+  function usePhoto() {
+    if (!shot) return;
+    const file = new File([shot.blob], 'guided-photo.jpg', { type: 'image/jpeg' });
+    close();
+    opts.onCapture && opts.onCapture(file);
+  }
+
+  $('cam-shutter').addEventListener('click', capture);
+  $('cam-left').addEventListener('click', () => {
+    if (shot) {                       // Retake
+      URL.revokeObjectURL(shot.url); shot = null;
+      still.style.display = 'none'; still.removeAttribute('src');
+      setReview(false);
+      video.play().catch(() => {});
+    } else close();                   // Cancel
+  });
+  $('cam-flip').addEventListener('click', () => { facing = facing === 'environment' ? 'user' : 'environment'; start(); });
+  $('cam-guide-toggle').addEventListener('click', (e) => {
+    guideOn = !guideOn;
+    guide.style.display = guideOn ? '' : 'none';
+    e.currentTarget.classList.toggle('on', guideOn);
+    e.currentTarget.textContent = 'Outline ' + (guideOn ? 'on' : 'off');
+    try { localStorage.setItem(CAM_GUIDE_KEY, guideOn ? 'on' : 'off'); } catch (_) {}
+  });
+
+  start();
+}
+
+// ================================================================
 //   ICONS (inline SVG)
 // ================================================================
 const I = {
@@ -1329,6 +1544,7 @@ const state = {
   view: 'today',     // 'today' | 'clients' | 'eod' | 'settings' | 'new-client' | 'profile' | 'treatment' | 'rates' | 'schedule' | 'appt-form'
   selectedClientId: null,
   selectedTreatmentId: null,
+  profileBack: 'clients',   // where the client summary's back arrow returns to: 'clients' | 'today' | 'schedule'
   editClientId: null,   // when set, the new-client form edits this client instead of creating one
   editApptId: null,     // when set, the appointment form edits this appointment instead of creating one
   dayDate: null,        // day shown on the Today/day view (ISO); null = today. The Today tab resets it to today.
@@ -1359,6 +1575,10 @@ function setView(view, params = {}) {
   // Opening End of Day always starts fresh on the current month; in-page date
   // changes only re-render, so the chosen range still persists while you're there.
   if (view === 'eod') { state.eodStart = null; state.eodEnd = null; }
+  // Remember which list the client summary was opened from, so its back arrow
+  // returns there (an appointment row on Today/Schedule, or the Clients list).
+  if (view === 'profile' && ['today', 'schedule', 'clients'].includes(state.view)) state.profileBack = state.view;
+  if (view !== 'treatment') stopGuidedCamera();
   state.view = view;
   if (params.clientId !== undefined) state.selectedClientId = params.clientId;
   if (params.treatmentId !== undefined) state.selectedTreatmentId = params.treatmentId;
@@ -1788,7 +2008,7 @@ function backupBannerHTML() {
 
 // ---------- TODAY / DAY VIEW ----------
 // The Today tab is a day view: pick any date and see that day's appointments
-// (tap one to start its treatment) plus any treatments recorded that day.
+// (tap one to open that client's summary) plus any treatments recorded that day.
 // Defaults to today; the chosen day lives in state.dayDate and the Today tab
 // resets it to today.
 function viewToday() {
@@ -2054,7 +2274,7 @@ function viewProfile() {
   return `
     <div class="screen cream-screen">
       <div class="top-bar">
-        <button class="back" data-nav="clients">${I.chevronLeft}</button>
+        <button class="back" data-back-view="${state.profileBack || 'clients'}">${I.chevronLeft}</button>
         <div class="title">Client</div>
         <div style="display:flex;gap:2px;">
           <button class="action" data-edit-client>Edit</button>
@@ -3377,6 +3597,12 @@ function attachHandlers() {
     });
   });
 
+  // Client summary back arrow: return to the list it was opened from. Unlike
+  // data-nav="today" this keeps the day currently in view.
+  document.querySelectorAll('[data-back-view]').forEach(el => {
+    el.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); setView(el.dataset.backView); });
+  });
+
   // Clients list search
   if (state.view === 'clients') setupClients();
   // End of Day period summary range controls
@@ -4310,6 +4536,17 @@ function setupTreatment() {
     if (inp) { inp.value = ''; inp.click(); }
   }
 
+  // Take photo → the in-app camera with the face outline. The standard camera
+  // input stays as the fallback if the live camera can't start.
+  function takeGuidedPhoto(slot) {
+    const label = (PHOTO_SLOTS.find(s => s.key === slot) || {}).label || 'Photo';
+    openGuidedCamera({
+      title: label,
+      onCapture: (file) => handlePhotoFile(file, null, slot),
+      onFallback: () => triggerPhotoInput('photo-cam-', slot)
+    });
+  }
+
   async function removeSlotPhoto(slot) {
     const annotated = slot === ANNOTATED_SLOT;
     if (!confirm(annotated ? 'Remove this photo and all annotations?' : 'Remove this photo?')) return;
@@ -4332,10 +4569,10 @@ function setupTreatment() {
     btn.addEventListener('click', () => {
       const slot = btn.dataset.slot;
       switch (btn.dataset.photoAction) {
-        case 'take': triggerPhotoInput('photo-cam-', slot); break;
+        case 'take': takeGuidedPhoto(slot); break;
         case 'pick': triggerPhotoInput('photo-lib-', slot); break;
         case 'replace':
-          if (confirm('Replace photo?\n\nTap OK to take a new photo with camera, or Cancel to choose from library.')) triggerPhotoInput('photo-cam-', slot);
+          if (confirm('Replace photo?\n\nTap OK to take a new photo with camera, or Cancel to choose from library.')) takeGuidedPhoto(slot);
           else triggerPhotoInput('photo-lib-', slot);
           break;
         case 'remove': removeSlotPhoto(slot); break;
@@ -4575,13 +4812,13 @@ function setupRates() {
 // ---------- Settings Handlers ----------
 // ---------- Schedule / Appointment list Handlers ----------
 // Wires the appointment rows shown on both the Today day view and the full
-// Schedule: tapping the row starts a treatment, the pencil edits, and "+ Add"
+// Schedule: tapping the row opens the client's summary, the pencil edits, and "+ Add"
 // opens a blank form (pre-dated to the day currently in view).
 function setupSchedule() {
   document.querySelectorAll('.appt-start').forEach(btn => {
     btn.addEventListener('click', () => {
       const appt = (state.data.appointments || []).find(a => a.id === btn.dataset.apptId);
-      if (appt) startTreatmentFromAppointment(appt);
+      if (appt) openClientFromAppointment(appt);
     });
   });
   document.querySelectorAll('[data-appt-edit]').forEach(btn => {
@@ -4656,12 +4893,12 @@ function setupAppointmentForm() {
   check();
 }
 
-// Tapping an appointment starts a new treatment for that client — matching an
+// Tapping an appointment opens that client's summary page — matching an
 // existing client by name, or auto-creating a name-only client if none matches
 // yet (the same way the Excel import does, with NO confirm prompt, so manually
-// added appointments behave the same as imported ones). The new-treatment page's
-// back button returns to the client's profile.
-function startTreatmentFromAppointment(appt) {
+// added appointments behave the same as imported ones). The summary's back
+// arrow returns to the appointment list it was opened from.
+function openClientFromAppointment(appt) {
   const full = (appt.name || '').trim();
   if (!full) return;
   let client = state.data.clients.find(c =>
@@ -4678,7 +4915,10 @@ function startTreatmentFromAppointment(appt) {
     state.data.clients.push(client);
     saveData();
   }
-  setView('treatment', { clientId: client.id, treatmentId: 'new' });
+  // Open the client's summary page (history, photos, rates). A new visit is
+  // started from there with the "New treatment" button — tapping an appointment
+  // no longer creates one.
+  setView('profile', { clientId: client.id });
 }
 
 // Holds a prepared backup File if a first Export tap couldn't open the iOS share
